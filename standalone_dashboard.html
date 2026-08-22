@@ -1,0 +1,1522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Multi-Device 4G Gateway Telemetry Dashboard</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- MQTT.js Reliable CDN Bundles -->
+    <script src="https://cdn.jsdelivr.net/npm/mqtt@5.3.4/dist/mqtt.min.js"></script>
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        /* --------------------------------------------------------------------------
+           DARK GLASSMORPHISM TELEMETRY DASHBOARD STYLES (STANDALONE EDITION)
+           -------------------------------------------------------------------------- */
+        :root {
+            --bg-dark: #0a0e17;
+            --panel-bg: rgba(18, 26, 44, 0.65);
+            --panel-border: rgba(255, 255, 255, 0.08);
+            --card-bg: rgba(25, 36, 60, 0.45);
+            
+            --primary-cyan: #00f2fe;
+            --accent-blue: #4facfe;
+            --accent-green: #00e676;
+            --accent-red: #ff5252;
+            --accent-yellow: #ffd600;
+            --accent-purple: #9c27b0;
+            
+            --phase-a: #ff5252;
+            --phase-b: #ffd600;
+            --phase-c: #29b6f6;
+
+            --text-main: #f0f4f8;
+            --text-muted: #8e9bb0;
+            --text-sub: #b0bec5;
+
+            --font-heading: 'Outfit', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background: var(--bg-dark);
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(0, 242, 254, 0.08) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(79, 172, 254, 0.06) 0%, transparent 40%),
+                radial-gradient(circle at 50% 50%, rgba(10, 14, 23, 1) 0%, transparent 100%);
+            background-attachment: fixed;
+            color: var(--text-main);
+            font-family: var(--font-heading);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        .glass-panel {
+            background: var(--panel-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--panel-border);
+            border-radius: 16px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        }
+
+        .app-container {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        /* Top Navbar */
+        .top-navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 24px;
+            background: rgba(18, 26, 44, 0.85);
+            backdrop-filter: blur(12px);
+            border-radius: 16px;
+            border: 1px solid var(--panel-border);
+        }
+
+        .brand-logo {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .logo-icon {
+            width: 44px;
+            height: 44px;
+            background: linear-gradient(135deg, var(--primary-cyan), var(--accent-blue));
+            border-radius: 12px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 20px;
+            color: #0a0e17;
+            box-shadow: 0 0 20px rgba(0, 242, 254, 0.4);
+        }
+
+        .brand-text h1 {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            background: linear-gradient(90deg, #ffffff, var(--primary-cyan));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .brand-text span {
+            font-size: 12px;
+            color: var(--text-muted);
+            font-weight: 400;
+        }
+
+        .connection-bar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        /* Device Selector Box */
+        .device-select-box {
+            display: flex;
+            align-items: center;
+            background: rgba(0, 242, 254, 0.1);
+            border: 1px solid rgba(0, 242, 254, 0.3);
+            border-radius: 10px;
+            padding: 4px 10px;
+            gap: 8px;
+        }
+
+        .select-icon {
+            color: var(--primary-cyan);
+            font-size: 14px;
+        }
+
+        .device-select-box select {
+            background: transparent;
+            border: none;
+            color: #ffffff;
+            font-family: var(--font-heading);
+            font-size: 13px;
+            font-weight: 600;
+            outline: none;
+            cursor: pointer;
+            padding-right: 10px;
+        }
+
+        .device-select-box select option {
+            background: #121a2c;
+            color: #ffffff;
+        }
+
+        /* Fleet Devices Bar */
+        .fleet-bar-section {
+            padding: 14px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .fleet-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+            color: var(--text-sub);
+            font-weight: 600;
+        }
+
+        .active-mac-badge {
+            background: rgba(0, 242, 254, 0.15);
+            border: 1px solid rgba(0, 242, 254, 0.4);
+            color: var(--primary-cyan);
+            padding: 2px 10px;
+            border-radius: 20px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+        }
+
+        .fleet-devices-list {
+            display: flex;
+            gap: 12px;
+            overflow-x: auto;
+            padding-bottom: 4px;
+        }
+
+        .empty-fleet-msg {
+            font-size: 12px;
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        .device-chip-card {
+            background: rgba(25, 36, 60, 0.6);
+            border: 1px solid var(--panel-border);
+            border-radius: 10px;
+            padding: 8px 14px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            min-width: 200px;
+        }
+        .device-chip-card:hover {
+            border-color: rgba(0, 242, 254, 0.4);
+            background: rgba(25, 36, 60, 0.8);
+        }
+
+        .device-chip-card.selected-active {
+            border-color: var(--primary-cyan);
+            background: linear-gradient(135deg, rgba(0, 242, 254, 0.15), rgba(18, 26, 44, 0.8));
+            box-shadow: 0 0 12px rgba(0, 242, 254, 0.2);
+        }
+
+        .device-chip-info {
+            display: flex;
+            flex-direction: column;
+        }
+        .device-mac-title {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            font-weight: 600;
+            color: #fff;
+        }
+        .device-chip-sub {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        /* Status Indicator Badge */
+        .status-indicator-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 30px;
+            font-size: 13px;
+            font-weight: 600;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.3s ease;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        .status-indicator-badge.connected {
+            background: rgba(0, 230, 118, 0.15);
+            border-color: rgba(0, 230, 118, 0.4);
+            color: var(--accent-green);
+        }
+        .status-indicator-badge.connected .status-dot {
+            background: var(--accent-green);
+            box-shadow: 0 0 10px var(--accent-green);
+        }
+
+        .status-indicator-badge.disconnected {
+            background: rgba(255, 82, 82, 0.15);
+            border-color: rgba(255, 82, 82, 0.4);
+            color: var(--accent-red);
+        }
+        .status-indicator-badge.disconnected .status-dot {
+            background: var(--accent-red);
+            box-shadow: 0 0 10px var(--accent-red);
+        }
+
+        .info-chip {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            background: rgba(255, 255, 255, 0.04);
+            padding: 6px 14px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            color: var(--text-sub);
+        }
+
+        .info-chip i {
+            color: var(--primary-cyan);
+        }
+
+        /* Config Modal */
+        .config-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(8px);
+            z-index: 999;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .config-modal.hidden {
+            display: none;
+        }
+
+        .config-card {
+            width: 500px;
+            max-width: 90%;
+            padding: 24px;
+        }
+
+        .config-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .config-header h3 {
+            font-size: 18px;
+            color: var(--primary-cyan);
+        }
+
+        .close-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 20px;
+            cursor: pointer;
+        }
+
+        .config-form {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .form-group label {
+            font-size: 13px;
+            color: var(--text-sub);
+        }
+        .form-group input {
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid var(--panel-border);
+            padding: 10px 14px;
+            border-radius: 8px;
+            color: #fff;
+            font-family: var(--font-mono);
+            font-size: 13px;
+        }
+        .form-group small {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .form-row {
+            display: flex;
+            gap: 16px;
+        }
+        .form-row .form-group {
+            flex: 1;
+        }
+
+        .form-actions {
+            display: flex;
+            gap: 12px;
+            margin-top: 10px;
+        }
+
+        .btn {
+            padding: 10px 18px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 13px;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary-cyan), var(--accent-blue));
+            color: #0a0e17;
+        }
+        .btn-primary:hover {
+            box-shadow: 0 0 15px rgba(0, 242, 254, 0.4);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+        }
+        .btn-settings {
+            background: rgba(0, 242, 254, 0.1);
+            color: var(--primary-cyan);
+            border: 1px solid rgba(0, 242, 254, 0.2);
+        }
+
+        /* Dashboard Grid */
+        .dashboard-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .dash-section {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .section-title {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--primary-cyan);
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .cards-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 16px;
+        }
+
+        .metrics-grid-4 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 16px;
+        }
+
+        .metrics-grid-3 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 16px;
+        }
+
+        .stat-card {
+            padding: 18px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            gap: 10px;
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+        .stat-card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(0, 242, 254, 0.3);
+        }
+
+        .highlight-border {
+            border-color: rgba(0, 242, 254, 0.4);
+            background: linear-gradient(135deg, rgba(0, 242, 254, 0.05), rgba(18, 26, 44, 0.7));
+        }
+
+        .card-header {
+            font-size: 13px;
+            color: var(--text-muted);
+            font-weight: 500;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .card-icon {
+            font-size: 18px;
+            color: var(--text-muted);
+        }
+        .accent-text {
+            color: var(--primary-cyan);
+        }
+
+        .big-value-container {
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+        }
+
+        .big-value {
+            font-size: 28px;
+            font-weight: 700;
+            font-family: var(--font-mono);
+            color: #fff;
+        }
+
+        .unit {
+            font-size: 13px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .card-footer {
+            font-size: 11px;
+            color: var(--text-muted);
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+            padding-top: 8px;
+        }
+
+        /* Digital LED Box */
+        .status-led-box {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 0;
+        }
+
+        .led-light {
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: #37474f;
+            border: 2px solid #546e7a;
+            transition: all 0.3s ease;
+        }
+
+        .led-light.active-high {
+            background: var(--accent-green);
+            border-color: #b9f6ca;
+            box-shadow: 0 0 16px var(--accent-green);
+        }
+
+        .led-light.active-low {
+            background: #37474f;
+            border-color: #546e7a;
+        }
+
+        .led-state-text {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        /* Phase Cards Container */
+        .phase-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 16px;
+        }
+
+        .phase-card {
+            padding: 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .phase-badge {
+            padding: 4px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 700;
+            display: inline-block;
+            align-self: flex-start;
+            margin-bottom: 6px;
+        }
+
+        .phase-a .phase-badge { background: rgba(255, 82, 82, 0.2); color: var(--phase-a); border: 1px solid rgba(255, 82, 82, 0.4); }
+        .phase-b .phase-badge { background: rgba(255, 214, 0, 0.2); color: var(--phase-b); border: 1px solid rgba(255, 214, 0, 0.4); }
+        .phase-c .phase-badge { background: rgba(41, 182, 246, 0.2); color: var(--phase-c); border: 1px solid rgba(41, 182, 246, 0.4); }
+        .phase-tot .phase-badge { background: rgba(0, 242, 254, 0.2); color: var(--primary-cyan); border: 1px solid rgba(0, 242, 254, 0.4); }
+
+        .phase-metric {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+        }
+
+        .phase-metric .label {
+            color: var(--text-muted);
+        }
+        .phase-metric .val {
+            font-family: var(--font-mono);
+            font-weight: 600;
+        }
+
+        .text-green { color: var(--accent-green); }
+        .text-cyan { color: var(--primary-cyan); }
+        .text-yellow { color: var(--accent-yellow); }
+
+        .sub-table-panel {
+            padding: 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+        .panel-header {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-sub);
+        }
+
+        .table-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+        }
+
+        .t-cell {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 10px 14px;
+            border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+        }
+        .t-cell .lbl { color: var(--text-muted); }
+        .t-cell span:last-child { font-family: var(--font-mono); font-weight: 600; }
+
+        .chart-panel {
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .chart-box {
+            position: relative;
+            height: 300px;
+            width: 100%;
+        }
+
+        .thd-subrow {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            padding: 6px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        }
+        .thd-subrow:last-child { border-bottom: none; }
+        .thd-subrow strong { font-family: var(--font-mono); color: var(--primary-cyan); }
+
+        .console-panel {
+            padding: 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .console-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+        }
+
+        .console-header code {
+            background: rgba(0, 242, 254, 0.15);
+            color: var(--primary-cyan);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+        }
+
+        .console-body {
+            background: rgba(0, 0, 0, 0.6);
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            padding: 14px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: #00e676;
+            max-height: 240px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .btn-small {
+            padding: 4px 10px;
+            font-size: 11px;
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--text-sub);
+        }
+
+        @media (max-width: 768px) {
+            .top-navbar {
+                flex-direction: column;
+                gap: 14px;
+                align-items: flex-start;
+            }
+            .connection-bar {
+                width: 100%;
+                flex-wrap: wrap;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Top Navigation Bar -->
+        <header class="top-navbar">
+            <div class="brand-logo">
+                <div class="logo-icon">
+                    <i class="fa-solid fa-bolt-lightning"></i>
+                </div>
+                <div class="brand-text">
+                    <h1>OXYMORA FLEET GATEWAY</h1>
+                    <span>Multi-Device 4G Telemetry Dashboard</span>
+                </div>
+            </div>
+
+            <!-- Global Connection & Device Selector Bar -->
+            <div class="connection-bar">
+                <!-- Device Selector Dropdown -->
+                <div class="device-select-box">
+                    <i class="fa-solid fa-microchip select-icon"></i>
+                    <select id="device-select-dropdown">
+                        <option value="AUTO_LATEST">⚡ Auto (Latest Packet)</option>
+                    </select>
+                </div>
+
+                <div class="status-indicator-badge disconnected" id="mqtt-status-badge">
+                    <span class="status-dot"></span>
+                    <span id="mqtt-status-text">Disconnected</span>
+                </div>
+                <div class="info-chip">
+                    <i class="fa-solid fa-tower-cell"></i>
+                    <span id="csq-display">CSQ: -- ( -- dBm)</span>
+                </div>
+                <div class="info-chip">
+                    <i class="fa-solid fa-memory"></i>
+                    <span id="heap-display">Heap: -- KB</span>
+                </div>
+                <button class="btn btn-settings" id="toggle-config-btn">
+                    <i class="fa-solid fa-sliders"></i> Config
+                </button>
+            </div>
+        </header>
+
+        <!-- Discovered Devices Fleet Bar -->
+        <section class="fleet-bar-section glass-panel">
+            <div class="fleet-header">
+                <span><i class="fa-solid fa-network-wired"></i> Discovered Gateway Devices (<span id="device-count">0</span> Active)</span>
+                <span class="active-mac-badge" id="current-active-mac-badge">Selected: Auto</span>
+            </div>
+            <div class="fleet-devices-list" id="fleet-devices-list">
+                <div class="empty-fleet-msg">No 4G Gateway devices discovered yet. Connect MQTT broker to auto-discover devices...</div>
+            </div>
+        </section>
+
+        <!-- MQTT Configuration Modal -->
+        <div class="config-modal hidden" id="config-modal">
+            <div class="config-card glass-panel">
+                <div class="config-header">
+                    <h3><i class="fa-solid fa-sliders"></i> MQTT Broker & Fleet Settings</h3>
+                    <button class="close-btn" id="close-config-btn"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="config-form">
+                    <div class="form-group">
+                        <label for="broker-url">WebSocket Broker URL</label>
+                        <input type="text" id="broker-url" value="wss://otplai.com:9001/mqtt" placeholder="wss://otplai.com:9001/mqtt">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="mqtt-user">Username</label>
+                            <input type="text" id="mqtt-user" value="oxmo">
+                        </div>
+                        <div class="form-group">
+                            <label for="mqtt-pass">Password</label>
+                            <input type="password" id="mqtt-pass" value="123456789">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="mqtt-topic">Subscribe Topic Filter (Wildcard Multi-Device)</label>
+                        <input type="text" id="mqtt-topic" value="transformer/+/rx" placeholder="transformer/+/rx or transformer/#">
+                        <small>Topic format: <code>transformer/&lt;MACADDRESS&gt;/rx</code>. Using <code>+</code> auto-discovers all gateway devices!</small>
+                    </div>
+                    <div class="form-actions">
+                        <button class="btn btn-primary" id="connect-mqtt-btn">
+                            <i class="fa-solid fa-plug"></i> Connect Broker
+                        </button>
+                        <button class="btn btn-secondary" id="disconnect-mqtt-btn">
+                            <i class="fa-solid fa-power-off"></i> Disconnect
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Dashboard Content Area -->
+        <main class="dashboard-grid">
+
+            <!-- 1. SYSTEM & BOARD HARDWARE METRICS -->
+            <section class="dash-section">
+                <div class="section-title">
+                    <i class="fa-solid fa-microchip"></i>
+                    <h2>System & Digital / Analog IO</h2>
+                </div>
+                <div class="cards-row">
+                    <!-- Digital Input 1 Card -->
+                    <div class="stat-card glass-panel" id="di1-card">
+                        <div class="card-header">
+                            <span class="card-label">Digital Input 1 (GPIO 41)</span>
+                            <i class="fa-solid fa-toggle-on card-icon"></i>
+                        </div>
+                        <div class="card-body">
+                            <div class="status-led-box">
+                                <div class="led-light" id="di1-led"></div>
+                                <span class="led-state-text" id="di1-text">--</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">Terminal Pin 41</div>
+                    </div>
+
+                    <!-- Digital Input 2 Card -->
+                    <div class="stat-card glass-panel" id="di2-card">
+                        <div class="card-header">
+                            <span class="card-label">Digital Input 2 (GPIO 42)</span>
+                            <i class="fa-solid fa-toggle-on card-icon"></i>
+                        </div>
+                        <div class="card-body">
+                            <div class="status-led-box">
+                                <div class="led-light" id="di2-led"></div>
+                                <span class="led-state-text" id="di2-text">--</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">Terminal Pin 42</div>
+                    </div>
+
+                    <!-- 4-20mA Analog Sensor Card -->
+                    <div class="stat-card glass-panel highlight-border">
+                        <div class="card-header">
+                            <span class="card-label">4-20mA Analog Sensor</span>
+                            <i class="fa-solid fa-wave-square card-icon accent-text"></i>
+                        </div>
+                        <div class="card-body">
+                            <div class="big-value-container">
+                                <span class="big-value" id="analog-ma-val">0.00</span>
+                                <span class="unit">mA</span>
+                            </div>
+                            <div class="sub-detail">
+                                ADC Raw: <span id="analog-adc-val">0</span> / 4095
+                            </div>
+                        </div>
+                        <div class="card-footer">Board GPIO 1 Current Loop</div>
+                    </div>
+
+                    <!-- Signal Strength Card -->
+                    <div class="stat-card glass-panel">
+                        <div class="card-header">
+                            <span class="card-label">4G LTE Signal</span>
+                            <i class="fa-solid fa-signal card-icon"></i>
+                        </div>
+                        <div class="card-body">
+                            <div class="big-value-container">
+                                <span class="big-value" id="csq-value">0</span>
+                                <span class="unit">CSQ</span>
+                            </div>
+                            <div class="sub-detail" id="rssi-dbm-text">
+                                RSSI: -0 dBm
+                            </div>
+                        </div>
+                        <div class="card-footer" id="last-seen-time">Last Seen: Never</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 2. SECTION 1: ENERGY METERS (2700 - 2723) -->
+            <section class="dash-section">
+                <div class="section-title">
+                    <i class="fa-solid fa-charging-station"></i>
+                    <h2>Energy Meters (Registers 2700 - 2723)</h2>
+                </div>
+                <div class="metrics-grid-4">
+                    <div class="stat-card glass-panel">
+                        <div class="card-header">Total Active Energy</div>
+                        <div class="big-value-container">
+                            <span class="big-value text-green" id="en-tot-kwh">0.00</span>
+                            <span class="unit">kWh</span>
+                        </div>
+                        <div class="card-footer">Reg 2704</div>
+                    </div>
+
+                    <div class="stat-card glass-panel">
+                        <div class="card-header">Import Active Energy</div>
+                        <div class="big-value-container">
+                            <span class="big-value" id="en-imp-kwh">0.00</span>
+                            <span class="unit">kWh</span>
+                        </div>
+                        <div class="card-footer">Reg 2700</div>
+                    </div>
+
+                    <div class="stat-card glass-panel">
+                        <div class="card-header">Export Active Energy</div>
+                        <div class="big-value-container">
+                            <span class="big-value" id="en-exp-kwh">0.00</span>
+                            <span class="unit">kWh</span>
+                        </div>
+                        <div class="card-footer">Reg 2702</div>
+                    </div>
+
+                    <div class="stat-card glass-panel">
+                        <div class="card-header">Net Active Energy</div>
+                        <div class="big-value-container">
+                            <span class="big-value" id="en-net-kwh">0.00</span>
+                            <span class="unit">kWh</span>
+                        </div>
+                        <div class="card-footer">Reg 2706</div>
+                    </div>
+
+                    <div class="stat-card glass-panel">
+                        <div class="card-header">Total Reactive Energy</div>
+                        <div class="big-value-container">
+                            <span class="big-value" id="en-tot-kvarh">0.00</span>
+                            <span class="unit">kVARh</span>
+                        </div>
+                        <div class="card-footer">Reg 2712</div>
+                    </div>
+
+                    <div class="stat-card glass-panel">
+                        <div class="card-header">Net Reactive Energy</div>
+                        <div class="big-value-container">
+                            <span class="big-value" id="en-net-kvarh">0.00</span>
+                            <span class="unit">kVARh</span>
+                        </div>
+                        <div class="card-footer">Reg 2714</div>
+                    </div>
+
+                    <div class="stat-card glass-panel">
+                        <div class="card-header">Total Apparent Energy</div>
+                        <div class="big-value-container">
+                            <span class="big-value" id="en-tot-kvah">0.00</span>
+                            <span class="unit">kVAh</span>
+                        </div>
+                        <div class="card-footer">Reg 2720</div>
+                    </div>
+
+                    <div class="stat-card glass-panel">
+                        <div class="card-header">Net Apparent Energy</div>
+                        <div class="big-value-container">
+                            <span class="big-value" id="en-net-kvah">0.00</span>
+                            <span class="unit">kVAh</span>
+                        </div>
+                        <div class="card-footer">Reg 2722</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 3. SECTION 2: INSTANTANEOUS ELECTRICAL METRICS & CHARTS -->
+            <section class="dash-section">
+                <div class="section-title">
+                    <i class="fa-solid fa-gauge-high"></i>
+                    <h2>Instantaneous Electrical Metrics (Registers 3000 - 3111)</h2>
+                </div>
+
+                <!-- Phase Cards -->
+                <div class="phase-container">
+                    <div class="phase-card phase-a glass-panel">
+                        <div class="phase-badge">Phase A (Red)</div>
+                        <div class="phase-metric"><span class="label">Current (iA):</span> <span class="val" id="ph-ia">0.00 A</span></div>
+                        <div class="phase-metric"><span class="label">Voltage (vAN):</span> <span class="val" id="ph-van">0.0 V</span></div>
+                        <div class="phase-metric"><span class="label">Active Power:</span> <span class="val" id="ph-kwa">0.00 kW</span></div>
+                        <div class="phase-metric"><span class="label">Reactive Power:</span> <span class="val" id="ph-kvara">0.00 kVAR</span></div>
+                        <div class="phase-metric"><span class="label">Apparent Power:</span> <span class="val" id="ph-kvaa">0.00 kVA</span></div>
+                        <div class="phase-metric"><span class="label">Power Factor:</span> <span class="val" id="ph-pfa">0.00</span></div>
+                        <div class="phase-metric"><span class="label">Unbalance:</span> <span class="val" id="ph-iunba">0.0 %</span></div>
+                    </div>
+
+                    <div class="phase-card phase-b glass-panel">
+                        <div class="phase-badge">Phase B (Yellow)</div>
+                        <div class="phase-metric"><span class="label">Current (iB):</span> <span class="val" id="ph-ib">0.00 A</span></div>
+                        <div class="phase-metric"><span class="label">Voltage (vBN):</span> <span class="val" id="ph-vbn">0.0 V</span></div>
+                        <div class="phase-metric"><span class="label">Active Power:</span> <span class="val" id="ph-kwb">0.00 kW</span></div>
+                        <div class="phase-metric"><span class="label">Reactive Power:</span> <span class="val" id="ph-kvarb">0.00 kVAR</span></div>
+                        <div class="phase-metric"><span class="label">Apparent Power:</span> <span class="val" id="ph-kvab">0.00 kVA</span></div>
+                        <div class="phase-metric"><span class="label">Power Factor:</span> <span class="val" id="ph-pfb">0.00</span></div>
+                        <div class="phase-metric"><span class="label">Unbalance:</span> <span class="val" id="ph-iunbb">0.0 %</span></div>
+                    </div>
+
+                    <div class="phase-card phase-c glass-panel">
+                        <div class="phase-badge">Phase C (Blue)</div>
+                        <div class="phase-metric"><span class="label">Current (iC):</span> <span class="val" id="ph-ic">0.00 A</span></div>
+                        <div class="phase-metric"><span class="label">Voltage (vCN):</span> <span class="val" id="ph-vcn">0.0 V</span></div>
+                        <div class="phase-metric"><span class="label">Active Power:</span> <span class="val" id="ph-kwc">0.00 kW</span></div>
+                        <div class="phase-metric"><span class="label">Reactive Power:</span> <span class="val" id="ph-kvarc">0.00 kVAR</span></div>
+                        <div class="phase-metric"><span class="label">Apparent Power:</span> <span class="val" id="ph-kvac">0.00 kVA</span></div>
+                        <div class="phase-metric"><span class="label">Power Factor:</span> <span class="val" id="ph-pfc">0.00</span></div>
+                        <div class="phase-metric"><span class="label">Unbalance:</span> <span class="val" id="ph-iunbc">0.0 %</span></div>
+                    </div>
+
+                    <div class="phase-card phase-tot glass-panel">
+                        <div class="phase-badge">System Total</div>
+                        <div class="phase-metric"><span class="label">Avg Current:</span> <span class="val" id="sys-iavg">0.00 A</span></div>
+                        <div class="phase-metric"><span class="label">Avg Line Voltage:</span> <span class="val" id="sys-vlineavg">0.0 V</span></div>
+                        <div class="phase-metric"><span class="label">Total Active kW:</span> <span class="val text-cyan" id="sys-kwtot">0.00 kW</span></div>
+                        <div class="phase-metric"><span class="label">Total Reactive kVAR:</span> <span class="val" id="sys-kvartot">0.00 kVAR</span></div>
+                        <div class="phase-metric"><span class="label">Total Apparent kVA:</span> <span class="val" id="sys-kvatot">0.00 kVA</span></div>
+                        <div class="phase-metric"><span class="label">Total Power Factor:</span> <span class="val text-green" id="sys-pftot">0.00</span></div>
+                        <div class="phase-metric"><span class="label">Frequency:</span> <span class="val text-yellow" id="sys-freq">0.00 Hz</span></div>
+                    </div>
+                </div>
+
+                <div class="sub-table-panel glass-panel">
+                    <div class="panel-header"><i class="fa-solid fa-list-check"></i> Additional Electrical Parameters</div>
+                    <div class="table-grid">
+                        <div class="t-cell"><span class="lbl">vAB (Line):</span> <span id="val-vab">0.0 V</span></div>
+                        <div class="t-cell"><span class="lbl">vBC (Line):</span> <span id="val-vbc">0.0 V</span></div>
+                        <div class="t-cell"><span class="lbl">vCA (Line):</span> <span id="val-vca">0.0 V</span></div>
+                        <div class="t-cell"><span class="lbl">Neutral Current (iN):</span> <span id="val-in">0.00 A</span></div>
+                        <div class="t-cell"><span class="lbl">Ground Current (iG):</span> <span id="val-ig">0.00 A</span></div>
+                        <div class="t-cell"><span class="lbl">Worst Current Unb:</span> <span id="val-iunbmax">0.0 %</span></div>
+                        <div class="t-cell"><span class="lbl">Worst Voltage Unb (LL):</span> <span id="val-vunbllmax">0.0 %</span></div>
+                        <div class="t-cell"><span class="lbl">Worst Voltage Unb (LN):</span> <span id="val-vunblnmax">0.0 %</span></div>
+                    </div>
+                </div>
+
+                <div class="chart-panel glass-panel">
+                    <div class="chart-header">
+                        <span><i class="fa-solid fa-chart-line"></i> Realtime Telemetry Graph (<span id="chart-device-mac">No Device</span>)</span>
+                    </div>
+                    <div class="chart-box">
+                        <canvas id="liveTelemetryChart"></canvas>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 4. SECTION 3: THD HARMONICS (21300 - 21335) -->
+            <section class="dash-section">
+                <div class="section-title">
+                    <i class="fa-solid fa-wave-triangle"></i>
+                    <h2>THD Harmonics (Registers 21300 - 21335)</h2>
+                </div>
+                <div class="metrics-grid-3">
+                    <div class="stat-card glass-panel">
+                        <div class="card-header">Current THD (%)</div>
+                        <div class="thd-subrow"><span>Phase A:</span> <strong id="thd-ia">0.00 %</strong></div>
+                        <div class="thd-subrow"><span>Phase B:</span> <strong id="thd-ib">0.00 %</strong></div>
+                        <div class="thd-subrow"><span>Phase C:</span> <strong id="thd-ic">0.00 %</strong></div>
+                    </div>
+
+                    <div class="stat-card glass-panel">
+                        <div class="card-header">Line Voltage THD (%)</div>
+                        <div class="thd-subrow"><span>vAB:</span> <strong id="thd-vab">0.00 %</strong></div>
+                        <div class="thd-subrow"><span>vBC:</span> <strong id="thd-vbc">0.00 %</strong></div>
+                        <div class="thd-subrow"><span>vCA:</span> <strong id="thd-vca">0.00 %</strong></div>
+                    </div>
+
+                    <div class="stat-card glass-panel">
+                        <div class="card-header">Phase Voltage THD (%)</div>
+                        <div class="thd-subrow"><span>vAN:</span> <strong id="thd-van">0.00 %</strong></div>
+                        <div class="thd-subrow"><span>vBN:</span> <strong id="thd-vbn">0.00 %</strong></div>
+                        <div class="thd-subrow"><span>vCN:</span> <strong id="thd-vcn">0.00 %</strong></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 5. RAW LIVE MQTT JSON CONSOLE -->
+            <section class="dash-section">
+                <div class="section-title">
+                    <i class="fa-solid fa-code"></i>
+                    <h2>Live Raw MQTT JSON Console</h2>
+                </div>
+                <div class="console-panel glass-panel">
+                    <div class="console-header">
+                        <span><i class="fa-solid fa-terminal"></i> Subscribed Topic: <code id="active-sub-topic">None</code></span>
+                        <button class="btn btn-small" id="clear-console-btn"><i class="fa-solid fa-trash"></i> Clear</button>
+                    </div>
+                    <pre class="console-body" id="raw-json-console">// Waiting for incoming 4G MQTT telemetry packets...</pre>
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <!-- EMBEDDED DASHBOARD JAVASCRIPT -->
+    <script>
+        let mqttClient = null;
+        let liveChart = null;
+
+        const DEFAULT_WEBSOCKET_URL = 'wss://otplai.com:9001/mqtt';
+
+        const discoveredDevices = {};
+        let selectedMacAddress = 'AUTO_LATEST';
+        let lastReceivedMacAddress = null;
+
+        const MAX_DATA_POINTS = 20;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            initChart();
+            setupEventListeners();
+            autoConnectMQTT();
+        });
+
+        function setupEventListeners() {
+            const configModal = document.getElementById('config-modal');
+            const toggleConfigBtn = document.getElementById('toggle-config-btn');
+            const closeConfigBtn = document.getElementById('close-config-btn');
+            const connectBtn = document.getElementById('connect-mqtt-btn');
+            const disconnectBtn = document.getElementById('disconnect-mqtt-btn');
+            const clearConsoleBtn = document.getElementById('clear-console-btn');
+            const deviceSelectDropdown = document.getElementById('device-select-dropdown');
+
+            toggleConfigBtn.addEventListener('click', () => configModal.classList.remove('hidden'));
+            closeConfigBtn.addEventListener('click', () => configModal.classList.add('hidden'));
+
+            connectBtn.addEventListener('click', () => {
+                connectMQTT(document.getElementById('broker-url').value.trim());
+                configModal.classList.add('hidden');
+            });
+
+            disconnectBtn.addEventListener('click', () => {
+                if (mqttClient) {
+                    mqttClient.end();
+                    updateConnectionBadge(false, 'Disconnected');
+                }
+            });
+
+            clearConsoleBtn.addEventListener('click', () => {
+                document.getElementById('raw-json-console').innerText = '// Console cleared.';
+            });
+
+            deviceSelectDropdown.addEventListener('change', (e) => {
+                selectedMacAddress = e.target.value;
+                renderFleetDevicesList();
+                renderActiveDeviceDashboard();
+            });
+        }
+
+        function autoConnectMQTT() {
+            connectMQTT(DEFAULT_WEBSOCKET_URL);
+        }
+
+        function connectMQTT(targetBrokerUrl) {
+            const mqttLib = window.mqtt || (typeof mqtt !== 'undefined' ? mqtt : null);
+            if (!mqttLib || typeof mqttLib.connect !== 'function') {
+                console.warn('MQTT.js library not loaded yet, retrying in 300ms...');
+                setTimeout(() => connectMQTT(targetBrokerUrl), 300);
+                return;
+            }
+
+            const username  = document.getElementById('mqtt-user').value.trim();
+            const password  = document.getElementById('mqtt-pass').value.trim();
+            const topic     = document.getElementById('mqtt-topic').value.trim();
+
+            const urlToTry = targetBrokerUrl || DEFAULT_WEBSOCKET_URL;
+            document.getElementById('broker-url').value = urlToTry;
+
+            updateConnectionBadge(false, `Connecting...`);
+
+            if (mqttClient) {
+                mqttClient.end(true);
+            }
+
+            const options = {
+                clean: true,
+                connectTimeout: 8000,
+                clientId: 'StandaloneFleet_' + Math.random().toString(16).substring(2, 8),
+                username: username,
+                password: password,
+                keepalive: 60
+            };
+
+            console.log(`[MQTT ENGINE] Connecting to: ${urlToTry}`);
+            document.getElementById('active-sub-topic').innerText = topic;
+
+            try {
+                mqttClient = mqttLib.connect(urlToTry, options);
+
+                mqttClient.on('connect', () => {
+                    console.log(`✅ MQTT Connected successfully to ${urlToTry}!`);
+                    updateConnectionBadge(true, `Connected (otplai.com:9001)`);
+
+                    mqttClient.subscribe(topic, (err) => {
+                        if (err) {
+                            console.error('Subscription error:', err);
+                        } else {
+                            console.log(`Subscribed to topic filter: ${topic}`);
+                        }
+                    });
+                });
+
+                mqttClient.on('message', (receivedTopic, payload) => {
+                    try {
+                        const messageStr = payload.toString();
+                        const data = JSON.parse(messageStr);
+
+                        const topicParts = receivedTopic.split('/');
+                        const macAddress = (topicParts.length >= 2 && topicParts[1] !== '+') 
+                                            ? topicParts[1] 
+                                            : 'UNKNOWN_MAC';
+
+                        processDeviceTelemetry(macAddress, data, receivedTopic);
+                        logToConsole(`[${new Date().toLocaleTimeString()}] Device [${macAddress}] on ${receivedTopic}\n${JSON.stringify(data, null, 2)}`);
+
+                    } catch (e) {
+                        console.error('JSON Parse error:', e);
+                        logToConsole(`[RAW PAYLOAD] ${payload.toString()}`);
+                    }
+                });
+
+                mqttClient.on('error', (err) => {
+                    console.warn(`[MQTT Error]:`, err.message);
+                    updateConnectionBadge(false, 'Connection Failed');
+                });
+
+                mqttClient.on('close', () => {
+                    console.warn(`[MQTT] Connection closed`);
+                });
+
+            } catch (e) {
+                console.error('Connection Exception:', e);
+                updateConnectionBadge(false, 'Failed');
+            }
+        }
+
+        function processDeviceTelemetry(macAddress, data, topic) {
+            lastReceivedMacAddress = macAddress;
+
+            if (!discoveredDevices[macAddress]) {
+                discoveredDevices[macAddress] = {
+                    mac: macAddress,
+                    firstSeen: new Date(),
+                    chartHistory: {
+                        labels: [],
+                        iA: [], iB: [], iC: [], vAN: []
+                    }
+                };
+
+                addDeviceToDropdown(macAddress);
+            }
+
+            const dev = discoveredDevices[macAddress];
+            dev.lastData = data;
+            dev.lastSeen = new Date();
+            dev.topic = topic;
+            dev.csq = data.sys?.csq ?? 0;
+            dev.rssi = data.sys?.rssi ?? 0;
+
+            if (data.electrical) {
+                const timeLabel = new Date().toLocaleTimeString();
+                const ch = dev.chartHistory;
+                if (ch.labels.length >= MAX_DATA_POINTS) {
+                    ch.labels.shift();
+                    ch.iA.shift(); ch.iB.shift(); ch.iC.shift(); ch.vAN.shift();
+                }
+                ch.labels.push(timeLabel);
+                ch.iA.push(data.electrical.iA ?? 0);
+                ch.iB.push(data.electrical.iB ?? 0);
+                ch.iC.push(data.electrical.iC ?? 0);
+                ch.vAN.push(data.electrical.vAN ?? 0);
+            }
+
+            renderFleetDevicesList();
+
+            if (selectedMacAddress === 'AUTO_LATEST' || selectedMacAddress === macAddress) {
+                renderActiveDeviceDashboard();
+            }
+        }
+
+        function addDeviceToDropdown(macAddress) {
+            const dropdown = document.getElementById('device-select-dropdown');
+            const option = document.createElement('option');
+            option.value = macAddress;
+            option.innerText = `📡 ${macAddress}`;
+            dropdown.appendChild(option);
+        }
+
+        function renderFleetDevicesList() {
+            const fleetContainer = document.getElementById('fleet-devices-list');
+            const macKeys = Object.keys(discoveredDevices);
+
+            document.getElementById('device-count').innerText = macKeys.length;
+
+            if (macKeys.length === 0) {
+                fleetContainer.innerHTML = `<div class="empty-fleet-msg">No 4G Gateway devices discovered yet. Connect MQTT broker to auto-discover devices...</div>`;
+                return;
+            }
+
+            let activeMac = getActiveTargetMac();
+            document.getElementById('current-active-mac-badge').innerText = `Selected: ${activeMac ? activeMac : 'Auto'}`;
+
+            fleetContainer.innerHTML = '';
+            macKeys.forEach(mac => {
+                const dev = discoveredDevices[mac];
+                const isSelected = (activeMac === mac);
+                const timeAgoSec = Math.floor((new Date() - dev.lastSeen) / 1000);
+                const isOnline = timeAgoSec < 30;
+
+                const cardHtml = `
+                    <div class="device-chip-card ${isSelected ? 'selected-active' : ''}" onclick="selectDeviceFromFleet('${mac}')">
+                        <span class="status-dot" style="background: ${isOnline ? '#00e676' : '#ff5252'}; box-shadow: 0 0 8px ${isOnline ? '#00e676' : '#ff5252'};"></span>
+                        <div class="device-chip-info">
+                            <span class="device-mac-title">${mac}</span>
+                            <span class="device-chip-sub">CSQ: ${dev.csq} (${dev.rssi} dBm) • ${isOnline ? 'Online' : timeAgoSec + 's ago'}</span>
+                        </div>
+                    </div>
+                `;
+                fleetContainer.innerHTML += cardHtml;
+            });
+        }
+
+        function selectDeviceFromFleet(mac) {
+            selectedMacAddress = mac;
+            document.getElementById('device-select-dropdown').value = mac;
+            renderFleetDevicesList();
+            renderActiveDeviceDashboard();
+        }
+
+        function getActiveTargetMac() {
+            if (selectedMacAddress !== 'AUTO_LATEST') {
+                return selectedMacAddress;
+            }
+            return lastReceivedMacAddress || Object.keys(discoveredDevices)[0] || null;
+        }
+
+        function renderActiveDeviceDashboard() {
+            const targetMac = getActiveTargetMac();
+            if (!targetMac || !discoveredDevices[targetMac]) {
+                return;
+            }
+
+            const dev = discoveredDevices[targetMac];
+            const data = dev.lastData;
+
+            document.getElementById('chart-device-mac').innerText = `Device: ${targetMac}`;
+
+            if (data.sys) {
+                const csq = data.sys.csq ?? 0;
+                const rssi = data.sys.rssi ?? 0;
+                const heap = data.sys.free_heap ?? 0;
+
+                document.getElementById('csq-display').innerText = `CSQ: ${csq} (${rssi} dBm)`;
+                document.getElementById('csq-value').innerText = csq;
+                document.getElementById('rssi-dbm-text').innerText = `RSSI: ${rssi} dBm`;
+                document.getElementById('heap-display').innerText = `Heap: ${(heap / 1024).toFixed(1)} KB`;
+                document.getElementById('last-seen-time').innerText = `Last Seen: ${dev.lastSeen.toLocaleTimeString()} (${targetMac})`;
+            }
+
+            if (data.digital_input) {
+                updateDigitalLED('di1', data.digital_input.di1_gpio41);
+                updateDigitalLED('di2', data.digital_input.di2_gpio42);
+            }
+
+            if (data.analog) {
+                document.getElementById('analog-ma-val').innerText = (data.analog.mA_val ?? 0).toFixed(2);
+                document.getElementById('analog-adc-val').innerText = data.analog.raw_adc ?? 0;
+            }
+
+            if (data.energy) {
+                const e = data.energy;
+                document.getElementById('en-imp-kwh').innerText = (e.imp_kwh ?? 0).toFixed(2);
+                document.getElementById('en-exp-kwh').innerText = (e.exp_kwh ?? 0).toFixed(2);
+                document.getElementById('en-tot-kwh').innerText = (e.tot_kwh ?? 0).toFixed(2);
+                document.getElementById('en-net-kwh').innerText = (e.net_kwh ?? 0).toFixed(2);
+
+                document.getElementById('en-tot-kvarh').innerText = (e.tot_kvarh ?? 0).toFixed(2);
+                document.getElementById('en-net-kvarh').innerText = (e.net_kvarh ?? 0).toFixed(2);
+                document.getElementById('en-tot-kvah').innerText = (e.tot_kvah ?? 0).toFixed(2);
+                document.getElementById('en-net-kvah').innerText = (e.net_kvah ?? 0).toFixed(2);
+            }
+
+            if (data.electrical) {
+                const el = data.electrical;
+
+                document.getElementById('ph-ia').innerText = `${(el.iA ?? 0).toFixed(2)} A`;
+                document.getElementById('ph-van').innerText = `${(el.vAN ?? 0).toFixed(1)} V`;
+                document.getElementById('ph-kwa').innerText = `${(el.kwA ?? 0).toFixed(2)} kW`;
+                document.getElementById('ph-kvara').innerText = `${(el.kvarA ?? 0).toFixed(2)} kVAR`;
+                document.getElementById('ph-kvaa').innerText = `${(el.kvaA ?? 0).toFixed(2)} kVA`;
+                document.getElementById('ph-pfa').innerText = (el.pfA ?? 0).toFixed(2);
+                document.getElementById('ph-iunba').innerText = `${(el.iUnbA ?? 0).toFixed(1)} %`;
+
+                document.getElementById('ph-ib').innerText = `${(el.iB ?? 0).toFixed(2)} A`;
+                document.getElementById('ph-vbn').innerText = `${(el.vBN ?? 0).toFixed(1)} V`;
+                document.getElementById('ph-kwb').innerText = `${(el.kwB ?? 0).toFixed(2)} kW`;
+                document.getElementById('ph-kvarb').innerText = `${(el.kvarB ?? 0).toFixed(2)} kVAR`;
+                document.getElementById('ph-kvab').innerText = `${(el.kvaB ?? 0).toFixed(2)} kVA`;
+                document.getElementById('ph-pfb').innerText = (el.pfB ?? 0).toFixed(2);
+                document.getElementById('ph-iunbb').innerText = `${(el.iUnbB ?? 0).toFixed(1)} %`;
+
+                document.getElementById('ph-ic').innerText = `${(el.iC ?? 0).toFixed(2)} A`;
+                document.getElementById('ph-vcn').innerText = `${(el.vCN ?? 0).toFixed(1)} V`;
+                document.getElementById('ph-kwc').innerText = `${(el.kwC ?? 0).toFixed(2)} kW`;
+                document.getElementById('ph-kvarc').innerText = `${(el.kvarC ?? 0).toFixed(2)} kVAR`;
+                document.getElementById('ph-kvac').innerText = `${(el.kvaC ?? 0).toFixed(2)} kVA`;
+                document.getElementById('ph-pfc').innerText = (el.pfC ?? 0).toFixed(2);
+                document.getElementById('ph-iunbc').innerText = `${(el.iUnbC ?? 0).toFixed(1)} %`;
+
+                document.getElementById('sys-iavg').innerText = `${(el.iAvg ?? 0).toFixed(2)} A`;
+                document.getElementById('sys-vlineavg').innerText = `${(el.vLineAvg ?? 0).toFixed(1)} V`;
+                document.getElementById('sys-kwtot').innerText = `${(el.kwTot ?? 0).toFixed(2)} kW`;
+                document.getElementById('sys-kvartot').innerText = `${(el.kvarTot ?? 0).toFixed(2)} kVAR`;
+                document.getElementById('sys-kvatot').innerText = `${(el.kvaTot ?? 0).toFixed(2)} kVA`;
+                document.getElementById('sys-pftot').innerText = (el.pfTot ?? 0).toFixed(2);
+                document.getElementById('sys-freq').innerText = `${(el.freq ?? 0).toFixed(2)} Hz`;
+
+                document.getElementById('val-vab').innerText = `${(el.vAB ?? 0).toFixed(1)} V`;
+                document.getElementById('val-vbc').innerText = `${(el.vBC ?? 0).toFixed(1)} V`;
+                document.getElementById('val-vca').innerText = `${(el.vCA ?? 0).toFixed(1)} V`;
+                document.getElementById('val-in').innerText = `${(el.iN ?? 0).toFixed(2)} A`;
+                document.getElementById('val-ig').innerText = `${(el.iG ?? 0).toFixed(2)} A`;
+                document.getElementById('val-iunbmax').innerText = `${(el.iUnbMax ?? 0).toFixed(1)} %`;
+                document.getElementById('val-vunbllmax').innerText = `${(el.vUnbLLMax ?? 0).toFixed(1)} %`;
+                document.getElementById('val-vunblnmax').innerText = `${(el.vUnbLNMax ?? 0).toFixed(1)} %`;
+            }
+
+            if (data.thd) {
+                const th = data.thd;
+                document.getElementById('thd-ia').innerText = `${(th.thd_iA ?? 0).toFixed(2)} %`;
+                document.getElementById('thd-ib').innerText = `${(th.thd_iB ?? 0).toFixed(2)} %`;
+                document.getElementById('thd-ic').innerText = `${(th.thd_iC ?? 0).toFixed(2)} %`;
+
+                document.getElementById('thd-vab').innerText = `${(th.thd_vAB ?? 0).toFixed(2)} %`;
+                document.getElementById('thd-vbc').innerText = `${(th.thd_vBC ?? 0).toFixed(2)} %`;
+                document.getElementById('thd-vca').innerText = `${(th.thd_vCA ?? 0).toFixed(2)} %`;
+
+                document.getElementById('thd-van').innerText = `${(th.thd_vAN ?? 0).toFixed(2)} %`;
+                document.getElementById('thd-vbn').innerText = `${(th.thd_vBN ?? 0).toFixed(2)} %`;
+                document.getElementById('thd-vcn').innerText = `${(th.thd_vCN ?? 0).toFixed(2)} %`;
+            }
+
+            renderDeviceChart(dev.chartHistory);
+        }
+
+        function updateDigitalLED(idPrefix, val) {
+            const led = document.getElementById(`${idPrefix}-led`);
+            const text = document.getElementById(`${idPrefix}-text`);
+
+            if (val === 1 || val === true) {
+                led.classList.remove('active-low');
+                led.classList.add('active-high');
+                text.innerText = 'HIGH (OPEN)';
+                text.style.color = '#00e676';
+            } else {
+                led.classList.remove('active-high');
+                led.classList.add('active-low');
+                text.innerText = 'LOW (CLOSED)';
+                text.style.color = '#8e9bb0';
+            }
+        }
+
+        function logToConsole(msg) {
+            const consoleElem = document.getElementById('raw-json-console');
+            consoleElem.innerText = msg;
+        }
+
+        function updateConnectionBadge(isConnected, statusText) {
+            const badge = document.getElementById('mqtt-status-badge');
+            const badgeText = document.getElementById('mqtt-status-text');
+
+            badgeText.innerText = statusText;
+            if (isConnected) {
+                badge.classList.remove('disconnected');
+                badge.classList.add('connected');
+            } else {
+                badge.classList.remove('connected');
+                badge.classList.add('disconnected');
+            }
+        }
+
+        function initChart() {
+            const ctx = document.getElementById('liveTelemetryChart').getContext('2d');
+            liveChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'Current A (A)', data: [], borderColor: '#ff5252', borderWidth: 2, tension: 0.3, yAxisID: 'yCurrent' },
+                        { label: 'Current B (A)', data: [], borderColor: '#ffd600', borderWidth: 2, tension: 0.3, yAxisID: 'yCurrent' },
+                        { label: 'Current C (A)', data: [], borderColor: '#29b6f6', borderWidth: 2, tension: 0.3, yAxisID: 'yCurrent' },
+                        { label: 'Voltage AN (V)', data: [], borderColor: '#00f2fe', borderDash: [5, 5], borderWidth: 1.5, tension: 0.3, yAxisID: 'yVoltage' }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#8e9bb0', font: { family: 'JetBrains Mono', size: 10 } } },
+                        yCurrent: { type: 'linear', position: 'left', grid: { color: 'rgba(255, 255, 255, 0.05)' }, ticks: { color: '#8e9bb0' }, title: { display: true, text: 'Current (Amps)', color: '#8e9bb0' } },
+                        yVoltage: { type: 'linear', position: 'right', grid: { drawOnChartArea: false }, ticks: { color: '#00f2fe' }, title: { display: true, text: 'Voltage (Volts)', color: '#00f2fe' } }
+                    },
+                    plugins: {
+                        legend: { labels: { color: '#f0f4f8', font: { family: 'Outfit', size: 12 } } }
+                    }
+                }
+            });
+        }
+
+        function renderDeviceChart(chartHistory) {
+            if (!liveChart || !chartHistory) return;
+
+            liveChart.data.labels = chartHistory.labels;
+            liveChart.data.datasets[0].data = chartHistory.iA;
+            liveChart.data.datasets[1].data = chartHistory.iB;
+            liveChart.data.datasets[2].data = chartHistory.iC;
+            liveChart.data.datasets[3].data = chartHistory.vAN;
+
+            liveChart.update();
+        }
+    </script>
+</body>
+</html>
