@@ -1,37 +1,43 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32 Multi-Device 4G Gateway Telemetry Dashboard</title>
+    <title>ESP32 Multi-Device 4G Gateway Telemetry Dashboard (Firebase Edition)</title>
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
     <!-- FontAwesome Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- MQTT.js Reliable CDN Bundles -->
     <script src="https://cdn.jsdelivr.net/npm/mqtt@5.3.4/dist/mqtt.min.js"></script>
     <!-- Chart.js CDN -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Firebase SDK (v9 Compat Mode) -->
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
 
     <style>
         /* --------------------------------------------------------------------------
-           DARK GLASSMORPHISM TELEMETRY DASHBOARD STYLES (STANDALONE EDITION)
+           DARK GLASSMORPHISM TELEMETRY DASHBOARD STYLES (FIREBASE EDITION)
            -------------------------------------------------------------------------- */
         :root {
             --bg-dark: #0a0e17;
             --panel-bg: rgba(18, 26, 44, 0.65);
             --panel-border: rgba(255, 255, 255, 0.08);
             --card-bg: rgba(25, 36, 60, 0.45);
-            
+
             --primary-cyan: #00f2fe;
             --accent-blue: #4facfe;
             --accent-green: #00e676;
             --accent-red: #ff5252;
             --accent-yellow: #ffd600;
             --accent-purple: #9c27b0;
-            
+
             --phase-a: #ff5252;
             --phase-b: #ffd600;
             --phase-c: #29b6f6;
@@ -52,7 +58,7 @@
 
         body {
             background: var(--bg-dark);
-            background-image: 
+            background-image:
                 radial-gradient(circle at 10% 20%, rgba(0, 242, 254, 0.08) 0%, transparent 40%),
                 radial-gradient(circle at 90% 80%, rgba(79, 172, 254, 0.06) 0%, transparent 40%),
                 radial-gradient(circle at 50% 50%, rgba(10, 14, 23, 1) 0%, transparent 100%);
@@ -219,6 +225,7 @@
             transition: all 0.2s ease;
             min-width: 200px;
         }
+
         .device-chip-card:hover {
             border-color: rgba(0, 242, 254, 0.4);
             background: rgba(25, 36, 60, 0.8);
@@ -234,12 +241,14 @@
             display: flex;
             flex-direction: column;
         }
+
         .device-mac-title {
             font-family: var(--font-mono);
             font-size: 13px;
             font-weight: 600;
             color: #fff;
         }
+
         .device-chip-sub {
             font-size: 11px;
             color: var(--text-muted);
@@ -270,6 +279,7 @@
             border-color: rgba(0, 230, 118, 0.4);
             color: var(--accent-green);
         }
+
         .status-indicator-badge.connected .status-dot {
             background: var(--accent-green);
             box-shadow: 0 0 10px var(--accent-green);
@@ -280,6 +290,7 @@
             border-color: rgba(255, 82, 82, 0.4);
             color: var(--accent-red);
         }
+
         .status-indicator-badge.disconnected .status-dot {
             background: var(--accent-red);
             box-shadow: 0 0 10px var(--accent-red);
@@ -315,12 +326,13 @@
             justify-content: center;
             align-items: center;
         }
+
         .config-modal.hidden {
             display: none;
         }
 
         .config-card {
-            width: 500px;
+            width: 540px;
             max-width: 90%;
             padding: 24px;
         }
@@ -331,6 +343,7 @@
             align-items: center;
             margin-bottom: 20px;
         }
+
         .config-header h3 {
             font-size: 18px;
             color: var(--primary-cyan);
@@ -355,10 +368,12 @@
             flex-direction: column;
             gap: 6px;
         }
+
         .form-group label {
             font-size: 13px;
             color: var(--text-sub);
         }
+
         .form-group input {
             background: rgba(0, 0, 0, 0.4);
             border: 1px solid var(--panel-border);
@@ -368,6 +383,7 @@
             font-family: var(--font-mono);
             font-size: 13px;
         }
+
         .form-group small {
             font-size: 11px;
             color: var(--text-muted);
@@ -377,6 +393,7 @@
             display: flex;
             gap: 16px;
         }
+
         .form-row .form-group {
             flex: 1;
         }
@@ -404,6 +421,7 @@
             background: linear-gradient(135deg, var(--primary-cyan), var(--accent-blue));
             color: #0a0e17;
         }
+
         .btn-primary:hover {
             box-shadow: 0 0 15px rgba(0, 242, 254, 0.4);
         }
@@ -412,6 +430,13 @@
             background: rgba(255, 255, 255, 0.1);
             color: #fff;
         }
+
+        .btn-export {
+            background: linear-gradient(135deg, var(--accent-green), #00c853);
+            color: #0a0e17;
+            font-weight: 700;
+        }
+
         .btn-settings {
             background: rgba(0, 242, 254, 0.1);
             color: var(--primary-cyan);
@@ -434,10 +459,16 @@
         .section-title {
             display: flex;
             align-items: center;
-            gap: 10px;
+            justify-content: space-between;
             color: var(--primary-cyan);
             font-size: 16px;
             font-weight: 600;
+        }
+
+        .title-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
 
         .cards-row {
@@ -466,6 +497,7 @@
             gap: 10px;
             transition: transform 0.2s ease, border-color 0.2s ease;
         }
+
         .stat-card:hover {
             transform: translateY(-2px);
             border-color: rgba(0, 242, 254, 0.3);
@@ -489,6 +521,7 @@
             font-size: 18px;
             color: var(--text-muted);
         }
+
         .accent-text {
             color: var(--primary-cyan);
         }
@@ -576,10 +609,29 @@
             margin-bottom: 6px;
         }
 
-        .phase-a .phase-badge { background: rgba(255, 82, 82, 0.2); color: var(--phase-a); border: 1px solid rgba(255, 82, 82, 0.4); }
-        .phase-b .phase-badge { background: rgba(255, 214, 0, 0.2); color: var(--phase-b); border: 1px solid rgba(255, 214, 0, 0.4); }
-        .phase-c .phase-badge { background: rgba(41, 182, 246, 0.2); color: var(--phase-c); border: 1px solid rgba(41, 182, 246, 0.4); }
-        .phase-tot .phase-badge { background: rgba(0, 242, 254, 0.2); color: var(--primary-cyan); border: 1px solid rgba(0, 242, 254, 0.4); }
+        .phase-a .phase-badge {
+            background: rgba(255, 82, 82, 0.2);
+            color: var(--phase-a);
+            border: 1px solid rgba(255, 82, 82, 0.4);
+        }
+
+        .phase-b .phase-badge {
+            background: rgba(255, 214, 0, 0.2);
+            color: var(--phase-b);
+            border: 1px solid rgba(255, 214, 0, 0.4);
+        }
+
+        .phase-c .phase-badge {
+            background: rgba(41, 182, 246, 0.2);
+            color: var(--phase-c);
+            border: 1px solid rgba(41, 182, 246, 0.4);
+        }
+
+        .phase-tot .phase-badge {
+            background: rgba(0, 242, 254, 0.2);
+            color: var(--primary-cyan);
+            border: 1px solid rgba(0, 242, 254, 0.4);
+        }
 
         .phase-metric {
             display: flex;
@@ -590,14 +642,23 @@
         .phase-metric .label {
             color: var(--text-muted);
         }
+
         .phase-metric .val {
             font-family: var(--font-mono);
             font-weight: 600;
         }
 
-        .text-green { color: var(--accent-green); }
-        .text-cyan { color: var(--primary-cyan); }
-        .text-yellow { color: var(--accent-yellow); }
+        .text-green {
+            color: var(--accent-green);
+        }
+
+        .text-cyan {
+            color: var(--primary-cyan);
+        }
+
+        .text-yellow {
+            color: var(--accent-yellow);
+        }
 
         .sub-table-panel {
             padding: 18px;
@@ -605,6 +666,7 @@
             flex-direction: column;
             gap: 14px;
         }
+
         .panel-header {
             font-size: 14px;
             font-weight: 600;
@@ -625,8 +687,15 @@
             justify-content: space-between;
             font-size: 13px;
         }
-        .t-cell .lbl { color: var(--text-muted); }
-        .t-cell span:last-child { font-family: var(--font-mono); font-weight: 600; }
+
+        .t-cell .lbl {
+            color: var(--text-muted);
+        }
+
+        .t-cell span:last-child {
+            font-family: var(--font-mono);
+            font-weight: 600;
+        }
 
         .chart-panel {
             padding: 20px;
@@ -656,8 +725,15 @@
             padding: 6px 0;
             border-bottom: 1px solid rgba(255, 255, 255, 0.04);
         }
-        .thd-subrow:last-child { border-bottom: none; }
-        .thd-subrow strong { font-family: var(--font-mono); color: var(--primary-cyan); }
+
+        .thd-subrow:last-child {
+            border-bottom: none;
+        }
+
+        .thd-subrow strong {
+            font-family: var(--font-mono);
+            color: var(--primary-cyan);
+        }
 
         .console-panel {
             padding: 18px;
@@ -708,6 +784,7 @@
                 gap: 14px;
                 align-items: flex-start;
             }
+
             .connection-bar {
                 width: 100%;
                 flex-wrap: wrap;
@@ -715,6 +792,7 @@
         }
     </style>
 </head>
+
 <body>
     <div class="app-container">
         <!-- Top Navigation Bar -->
@@ -731,6 +809,11 @@
 
             <!-- Global Connection & Device Selector Bar -->
             <div class="connection-bar">
+                <!-- Export CSV Download Button -->
+                <button class="btn btn-export" id="export-csv-btn">
+                    <i class="fa-solid fa-file-excel"></i> Export CSV Log
+                </button>
+
                 <!-- Device Selector Dropdown -->
                 <div class="device-select-box">
                     <i class="fa-solid fa-microchip select-icon"></i>
@@ -743,6 +826,12 @@
                     <span class="status-dot"></span>
                     <span id="mqtt-status-text">Disconnected</span>
                 </div>
+
+                <div class="status-indicator-badge disconnected" id="firebase-status-badge">
+                    <span class="status-dot"></span>
+                    <span id="firebase-status-text">Firebase Off</span>
+                </div>
+
                 <div class="info-chip">
                     <i class="fa-solid fa-tower-cell"></i>
                     <span id="csq-display">CSQ: -- ( -- dBm)</span>
@@ -760,25 +849,28 @@
         <!-- Discovered Devices Fleet Bar -->
         <section class="fleet-bar-section glass-panel">
             <div class="fleet-header">
-                <span><i class="fa-solid fa-network-wired"></i> Discovered Gateway Devices (<span id="device-count">0</span> Active)</span>
+                <span><i class="fa-solid fa-network-wired"></i> Discovered Gateway Devices (<span
+                        id="device-count">0</span> Active)</span>
                 <span class="active-mac-badge" id="current-active-mac-badge">Selected: Auto</span>
             </div>
             <div class="fleet-devices-list" id="fleet-devices-list">
-                <div class="empty-fleet-msg">No 4G Gateway devices discovered yet. Connect MQTT broker to auto-discover devices...</div>
+                <div class="empty-fleet-msg">No 4G Gateway devices discovered yet. Connect MQTT broker to auto-discover
+                    devices...</div>
             </div>
         </section>
 
-        <!-- MQTT Configuration Modal -->
+        <!-- MQTT & FIREBASE Configuration Modal -->
         <div class="config-modal hidden" id="config-modal">
             <div class="config-card glass-panel">
                 <div class="config-header">
-                    <h3><i class="fa-solid fa-sliders"></i> MQTT Broker & Fleet Settings</h3>
+                    <h3><i class="fa-solid fa-sliders"></i> MQTT Broker & Firebase Cloud Settings</h3>
                     <button class="close-btn" id="close-config-btn"><i class="fa-solid fa-xmark"></i></button>
                 </div>
                 <div class="config-form">
                     <div class="form-group">
                         <label for="broker-url">WebSocket Broker URL</label>
-                        <input type="text" id="broker-url" value="wss://otplai.com:9001/mqtt" placeholder="wss://otplai.com:9001/mqtt">
+                        <input type="text" id="broker-url" value="wss://otplai.com:9001/mqtt"
+                            placeholder="wss://otplai.com:9001/mqtt">
                     </div>
                     <div class="form-row">
                         <div class="form-group">
@@ -791,13 +883,23 @@
                         </div>
                     </div>
                     <div class="form-group">
-                        <label for="mqtt-topic">Subscribe Topic Filter (Wildcard Multi-Device)</label>
-                        <input type="text" id="mqtt-topic" value="transformer/+/rx" placeholder="transformer/+/rx or transformer/#">
-                        <small>Topic format: <code>transformer/&lt;MACADDRESS&gt;/rx</code>. Using <code>+</code> auto-discovers all gateway devices!</small>
+                        <label for="mqtt-topic">Subscribe Topic Filter</label>
+                        <input type="text" id="mqtt-topic" value="transformer/+/rx">
                     </div>
+
+                    <hr style="border-color: var(--panel-border); margin: 6px 0;">
+
+                    <!-- Firebase Realtime DB URL Input -->
+                    <div class="form-group">
+                        <label for="firebase-db-url">🔥 Firebase Realtime Database URL (Cloud 24/7 Sync)</label>
+                        <input type="text" id="firebase-db-url" value=""
+                            placeholder="https://console.firebase.google.com/u/2/project/oxymora-gateway/database/oxymora-gateway-default-rtdb/data/~2F">
+                        <small>Paste your Firebase Realtime DB URL here to auto-save and auto-sync history 24/7!</small>
+                    </div>
+
                     <div class="form-actions">
                         <button class="btn btn-primary" id="connect-mqtt-btn">
-                            <i class="fa-solid fa-plug"></i> Connect Broker
+                            <i class="fa-solid fa-plug"></i> Connect & Save
                         </button>
                         <button class="btn btn-secondary" id="disconnect-mqtt-btn">
                             <i class="fa-solid fa-power-off"></i> Disconnect
@@ -813,8 +915,10 @@
             <!-- 1. SYSTEM & BOARD HARDWARE METRICS -->
             <section class="dash-section">
                 <div class="section-title">
-                    <i class="fa-solid fa-microchip"></i>
-                    <h2>System & Digital / Analog IO</h2>
+                    <div class="title-left">
+                        <i class="fa-solid fa-microchip"></i>
+                        <h2>System & Digital / Analog IO</h2>
+                    </div>
                 </div>
                 <div class="cards-row">
                     <!-- Digital Input 1 Card -->
@@ -888,8 +992,10 @@
             <!-- 2. SECTION 1: ENERGY METERS (2700 - 2723) -->
             <section class="dash-section">
                 <div class="section-title">
-                    <i class="fa-solid fa-charging-station"></i>
-                    <h2>Energy Meters (Registers 2700 - 2723)</h2>
+                    <div class="title-left">
+                        <i class="fa-solid fa-charging-station"></i>
+                        <h2>Energy Meters (Registers 2700 - 2723)</h2>
+                    </div>
                 </div>
                 <div class="metrics-grid-4">
                     <div class="stat-card glass-panel">
@@ -969,74 +1075,111 @@
             <!-- 3. SECTION 2: INSTANTANEOUS ELECTRICAL METRICS & CHARTS -->
             <section class="dash-section">
                 <div class="section-title">
-                    <i class="fa-solid fa-gauge-high"></i>
-                    <h2>Instantaneous Electrical Metrics (Registers 3000 - 3111)</h2>
+                    <div class="title-left">
+                        <i class="fa-solid fa-gauge-high"></i>
+                        <h2>Instantaneous Electrical Metrics (Registers 3000 - 3111)</h2>
+                    </div>
                 </div>
 
                 <!-- Phase Cards -->
                 <div class="phase-container">
                     <div class="phase-card phase-a glass-panel">
                         <div class="phase-badge">Phase A (Red)</div>
-                        <div class="phase-metric"><span class="label">Current (iA):</span> <span class="val" id="ph-ia">0.00 A</span></div>
-                        <div class="phase-metric"><span class="label">Voltage (vAN):</span> <span class="val" id="ph-van">0.0 V</span></div>
-                        <div class="phase-metric"><span class="label">Active Power:</span> <span class="val" id="ph-kwa">0.00 kW</span></div>
-                        <div class="phase-metric"><span class="label">Reactive Power:</span> <span class="val" id="ph-kvara">0.00 kVAR</span></div>
-                        <div class="phase-metric"><span class="label">Apparent Power:</span> <span class="val" id="ph-kvaa">0.00 kVA</span></div>
-                        <div class="phase-metric"><span class="label">Power Factor:</span> <span class="val" id="ph-pfa">0.00</span></div>
-                        <div class="phase-metric"><span class="label">Unbalance:</span> <span class="val" id="ph-iunba">0.0 %</span></div>
+                        <div class="phase-metric"><span class="label">Current (iA):</span> <span class="val"
+                                id="ph-ia">0.00 A</span></div>
+                        <div class="phase-metric"><span class="label">Voltage (vAN):</span> <span class="val"
+                                id="ph-van">0.0 V</span></div>
+                        <div class="phase-metric"><span class="label">Active Power:</span> <span class="val"
+                                id="ph-kwa">0.00 kW</span></div>
+                        <div class="phase-metric"><span class="label">Reactive Power:</span> <span class="val"
+                                id="ph-kvara">0.00 kVAR</span></div>
+                        <div class="phase-metric"><span class="label">Apparent Power:</span> <span class="val"
+                                id="ph-kvaa">0.00 kVA</span></div>
+                        <div class="phase-metric"><span class="label">Power Factor:</span> <span class="val"
+                                id="ph-pfa">0.00</span></div>
+                        <div class="phase-metric"><span class="label">Unbalance:</span> <span class="val"
+                                id="ph-iunba">0.0 %</span></div>
                     </div>
 
                     <div class="phase-card phase-b glass-panel">
                         <div class="phase-badge">Phase B (Yellow)</div>
-                        <div class="phase-metric"><span class="label">Current (iB):</span> <span class="val" id="ph-ib">0.00 A</span></div>
-                        <div class="phase-metric"><span class="label">Voltage (vBN):</span> <span class="val" id="ph-vbn">0.0 V</span></div>
-                        <div class="phase-metric"><span class="label">Active Power:</span> <span class="val" id="ph-kwb">0.00 kW</span></div>
-                        <div class="phase-metric"><span class="label">Reactive Power:</span> <span class="val" id="ph-kvarb">0.00 kVAR</span></div>
-                        <div class="phase-metric"><span class="label">Apparent Power:</span> <span class="val" id="ph-kvab">0.00 kVA</span></div>
-                        <div class="phase-metric"><span class="label">Power Factor:</span> <span class="val" id="ph-pfb">0.00</span></div>
-                        <div class="phase-metric"><span class="label">Unbalance:</span> <span class="val" id="ph-iunbb">0.0 %</span></div>
+                        <div class="phase-metric"><span class="label">Current (iB):</span> <span class="val"
+                                id="ph-ib">0.00 A</span></div>
+                        <div class="phase-metric"><span class="label">Voltage (vBN):</span> <span class="val"
+                                id="ph-vbn">0.0 V</span></div>
+                        <div class="phase-metric"><span class="label">Active Power:</span> <span class="val"
+                                id="ph-kwb">0.00 kW</span></div>
+                        <div class="phase-metric"><span class="label">Reactive Power:</span> <span class="val"
+                                id="ph-kvarb">0.00 kVAR</span></div>
+                        <div class="phase-metric"><span class="label">Apparent Power:</span> <span class="val"
+                                id="ph-kvab">0.00 kVA</span></div>
+                        <div class="phase-metric"><span class="label">Power Factor:</span> <span class="val"
+                                id="ph-pfb">0.00</span></div>
+                        <div class="phase-metric"><span class="label">Unbalance:</span> <span class="val"
+                                id="ph-iunbb">0.0 %</span></div>
                     </div>
 
                     <div class="phase-card phase-c glass-panel">
                         <div class="phase-badge">Phase C (Blue)</div>
-                        <div class="phase-metric"><span class="label">Current (iC):</span> <span class="val" id="ph-ic">0.00 A</span></div>
-                        <div class="phase-metric"><span class="label">Voltage (vCN):</span> <span class="val" id="ph-vcn">0.0 V</span></div>
-                        <div class="phase-metric"><span class="label">Active Power:</span> <span class="val" id="ph-kwc">0.00 kW</span></div>
-                        <div class="phase-metric"><span class="label">Reactive Power:</span> <span class="val" id="ph-kvarc">0.00 kVAR</span></div>
-                        <div class="phase-metric"><span class="label">Apparent Power:</span> <span class="val" id="ph-kvac">0.00 kVA</span></div>
-                        <div class="phase-metric"><span class="label">Power Factor:</span> <span class="val" id="ph-pfc">0.00</span></div>
-                        <div class="phase-metric"><span class="label">Unbalance:</span> <span class="val" id="ph-iunbc">0.0 %</span></div>
+                        <div class="phase-metric"><span class="label">Current (iC):</span> <span class="val"
+                                id="ph-ic">0.00 A</span></div>
+                        <div class="phase-metric"><span class="label">Voltage (vCN):</span> <span class="val"
+                                id="ph-vcn">0.0 V</span></div>
+                        <div class="phase-metric"><span class="label">Active Power:</span> <span class="val"
+                                id="ph-kwc">0.00 kW</span></div>
+                        <div class="phase-metric"><span class="label">Reactive Power:</span> <span class="val"
+                                id="ph-kvarc">0.00 kVAR</span></div>
+                        <div class="phase-metric"><span class="label">Apparent Power:</span> <span class="val"
+                                id="ph-kvac">0.00 kVA</span></div>
+                        <div class="phase-metric"><span class="label">Power Factor:</span> <span class="val"
+                                id="ph-pfc">0.00</span></div>
+                        <div class="phase-metric"><span class="label">Unbalance:</span> <span class="val"
+                                id="ph-iunbc">0.0 %</span></div>
                     </div>
 
                     <div class="phase-card phase-tot glass-panel">
                         <div class="phase-badge">System Total</div>
-                        <div class="phase-metric"><span class="label">Avg Current:</span> <span class="val" id="sys-iavg">0.00 A</span></div>
-                        <div class="phase-metric"><span class="label">Avg Line Voltage:</span> <span class="val" id="sys-vlineavg">0.0 V</span></div>
-                        <div class="phase-metric"><span class="label">Total Active kW:</span> <span class="val text-cyan" id="sys-kwtot">0.00 kW</span></div>
-                        <div class="phase-metric"><span class="label">Total Reactive kVAR:</span> <span class="val" id="sys-kvartot">0.00 kVAR</span></div>
-                        <div class="phase-metric"><span class="label">Total Apparent kVA:</span> <span class="val" id="sys-kvatot">0.00 kVA</span></div>
-                        <div class="phase-metric"><span class="label">Total Power Factor:</span> <span class="val text-green" id="sys-pftot">0.00</span></div>
-                        <div class="phase-metric"><span class="label">Frequency:</span> <span class="val text-yellow" id="sys-freq">0.00 Hz</span></div>
+                        <div class="phase-metric"><span class="label">Avg Current:</span> <span class="val"
+                                id="sys-iavg">0.00 A</span></div>
+                        <div class="phase-metric"><span class="label">Avg Line Voltage:</span> <span class="val"
+                                id="sys-vlineavg">0.0 V</span></div>
+                        <div class="phase-metric"><span class="label">Total Active kW:</span> <span
+                                class="val text-cyan" id="sys-kwtot">0.00 kW</span></div>
+                        <div class="phase-metric"><span class="label">Total Reactive kVAR:</span> <span class="val"
+                                id="sys-kvartot">0.00 kVAR</span></div>
+                        <div class="phase-metric"><span class="label">Total Apparent kVA:</span> <span class="val"
+                                id="sys-kvatot">0.00 kVA</span></div>
+                        <div class="phase-metric"><span class="label">Total Power Factor:</span> <span
+                                class="val text-green" id="sys-pftot">0.00</span></div>
+                        <div class="phase-metric"><span class="label">Frequency:</span> <span class="val text-yellow"
+                                id="sys-freq">0.00 Hz</span></div>
                     </div>
                 </div>
 
                 <div class="sub-table-panel glass-panel">
-                    <div class="panel-header"><i class="fa-solid fa-list-check"></i> Additional Electrical Parameters</div>
+                    <div class="panel-header"><i class="fa-solid fa-list-check"></i> Additional Electrical Parameters
+                    </div>
                     <div class="table-grid">
                         <div class="t-cell"><span class="lbl">vAB (Line):</span> <span id="val-vab">0.0 V</span></div>
                         <div class="t-cell"><span class="lbl">vBC (Line):</span> <span id="val-vbc">0.0 V</span></div>
                         <div class="t-cell"><span class="lbl">vCA (Line):</span> <span id="val-vca">0.0 V</span></div>
-                        <div class="t-cell"><span class="lbl">Neutral Current (iN):</span> <span id="val-in">0.00 A</span></div>
-                        <div class="t-cell"><span class="lbl">Ground Current (iG):</span> <span id="val-ig">0.00 A</span></div>
-                        <div class="t-cell"><span class="lbl">Worst Current Unb:</span> <span id="val-iunbmax">0.0 %</span></div>
-                        <div class="t-cell"><span class="lbl">Worst Voltage Unb (LL):</span> <span id="val-vunbllmax">0.0 %</span></div>
-                        <div class="t-cell"><span class="lbl">Worst Voltage Unb (LN):</span> <span id="val-vunblnmax">0.0 %</span></div>
+                        <div class="t-cell"><span class="lbl">Neutral Current (iN):</span> <span id="val-in">0.00
+                                A</span></div>
+                        <div class="t-cell"><span class="lbl">Ground Current (iG):</span> <span id="val-ig">0.00
+                                A</span></div>
+                        <div class="t-cell"><span class="lbl">Worst Current Unb:</span> <span id="val-iunbmax">0.0
+                                %</span></div>
+                        <div class="t-cell"><span class="lbl">Worst Voltage Unb (LL):</span> <span
+                                id="val-vunbllmax">0.0 %</span></div>
+                        <div class="t-cell"><span class="lbl">Worst Voltage Unb (LN):</span> <span
+                                id="val-vunblnmax">0.0 %</span></div>
                     </div>
                 </div>
 
                 <div class="chart-panel glass-panel">
                     <div class="chart-header">
-                        <span><i class="fa-solid fa-chart-line"></i> Realtime Telemetry Graph (<span id="chart-device-mac">No Device</span>)</span>
+                        <span><i class="fa-solid fa-chart-line"></i> Realtime Telemetry Graph (<span
+                                id="chart-device-mac">No Device</span>)</span>
                     </div>
                     <div class="chart-box">
                         <canvas id="liveTelemetryChart"></canvas>
@@ -1047,8 +1190,10 @@
             <!-- 4. SECTION 3: THD HARMONICS (21300 - 21335) -->
             <section class="dash-section">
                 <div class="section-title">
-                    <i class="fa-solid fa-wave-triangle"></i>
-                    <h2>THD Harmonics (Registers 21300 - 21335)</h2>
+                    <div class="title-left">
+                        <i class="fa-solid fa-wave-triangle"></i>
+                        <h2>THD Harmonics (Registers 21300 - 21335)</h2>
+                    </div>
                 </div>
                 <div class="metrics-grid-3">
                     <div class="stat-card glass-panel">
@@ -1077,38 +1222,161 @@
             <!-- 5. RAW LIVE MQTT JSON CONSOLE -->
             <section class="dash-section">
                 <div class="section-title">
-                    <i class="fa-solid fa-code"></i>
-                    <h2>Live Raw MQTT JSON Console</h2>
+                    <div class="title-left">
+                        <i class="fa-solid fa-code"></i>
+                        <h2>Live Raw MQTT JSON Console</h2>
+                    </div>
                 </div>
                 <div class="console-panel glass-panel">
                     <div class="console-header">
-                        <span><i class="fa-solid fa-terminal"></i> Subscribed Topic: <code id="active-sub-topic">None</code></span>
-                        <button class="btn btn-small" id="clear-console-btn"><i class="fa-solid fa-trash"></i> Clear</button>
+                        <span><i class="fa-solid fa-terminal"></i> Subscribed Topic: <code
+                                id="active-sub-topic">None</code></span>
+                        <button class="btn btn-small" id="clear-console-btn"><i class="fa-solid fa-trash"></i>
+                            Clear</button>
                     </div>
-                    <pre class="console-body" id="raw-json-console">// Waiting for incoming 4G MQTT telemetry packets...</pre>
+                    <pre class="console-body"
+                        id="raw-json-console">// Waiting for incoming 4G MQTT telemetry packets...</pre>
                 </div>
             </section>
 
         </main>
     </div>
 
-    <!-- EMBEDDED DASHBOARD JAVASCRIPT -->
+    <!-- EMBEDDED DASHBOARD JAVASCRIPT & FIREBASE SYNC ENGINE -->
     <script>
         let mqttClient = null;
         let liveChart = null;
+        let firebaseDb = null;
+        let firebaseConnected = false;
 
         const DEFAULT_WEBSOCKET_URL = 'wss://otplai.com:9001/mqtt';
 
         const discoveredDevices = {};
         let selectedMacAddress = 'AUTO_LATEST';
         let lastReceivedMacAddress = null;
+        const loggedRecordsMemory = [];
 
         const MAX_DATA_POINTS = 20;
+
+        // --------------------------------------------------------------------------
+        // 🔥 FIREBASE REALTIME DATABASE INITIALIZATION
+        // --------------------------------------------------------------------------
+        function initFirebase(databaseUrl) {
+            if (!databaseUrl) {
+                updateFirebaseBadge(false, 'Firebase Off');
+                return;
+            }
+
+            try {
+                // Initialize Firebase App if not already initialized
+                if (!firebase.apps.length) {
+                    firebase.initializeApp({
+                        databaseURL: databaseUrl
+                    });
+                }
+                firebaseDb = firebase.database();
+                firebaseConnected = true;
+                updateFirebaseBadge(true, 'Firebase Active 🔥');
+                console.log('🔥 Firebase Realtime Database Linked Successfully!');
+
+                // Auto-fetch past historical logs from Firebase
+                fetchHistoryFromFirebase();
+
+            } catch (e) {
+                console.error('Firebase Initialization Error:', e);
+                updateFirebaseBadge(false, 'Firebase Error');
+            }
+        }
+
+        function updateFirebaseBadge(isConnected, text) {
+            const badge = document.getElementById('firebase-status-badge');
+            const badgeText = document.getElementById('firebase-status-text');
+            badgeText.innerText = text;
+            if (isConnected) {
+                badge.classList.remove('disconnected');
+                badge.classList.add('connected');
+            } else {
+                badge.classList.remove('connected');
+                badge.classList.add('disconnected');
+            }
+        }
+
+        // Save incoming Telemetry reading 24/7 to Firebase Cloud Database
+        function saveToFirebase(mac, data) {
+            if (!firebaseDb || !firebaseConnected) return;
+
+            const timeKey = new Date().getTime();
+            const record = {
+                timestamp: new Date().toISOString(),
+                mac: mac,
+                kwh: data.energy?.tot_kwh ?? 0,
+                vAB: data.electrical?.vAB ?? 0,
+                iA: data.electrical?.iA ?? 0,
+                kwTot: data.electrical?.kwTot ?? 0,
+                analog_mA: data.analog?.mA_val ?? 0,
+                di1: data.digital_input?.di1_gpio41 ?? 0,
+                di2: data.digital_input?.di2_gpio42 ?? 0,
+                raw_json: JSON.stringify(data)
+            };
+
+            // Push under path: /telemetry_history/<MACADDRESS>/<TIMEKEY>
+            firebaseDb.ref(`telemetry_history/${mac}/${timeKey}`).set(record);
+            loggedRecordsMemory.push(record);
+        }
+
+        // Fetch past history logs from Firebase when dashboard opens
+        function fetchHistoryFromFirebase() {
+            if (!firebaseDb) return;
+
+            firebaseDb.ref('telemetry_history').limitToLast(500).once('value', (snapshot) => {
+                const historyData = snapshot.val();
+                if (!historyData) return;
+
+                console.log('🔥 Fetched past history logs from Firebase Cloud!');
+                Object.keys(historyData).forEach(mac => {
+                    const records = historyData[mac];
+                    Object.keys(records).forEach(timeKey => {
+                        loggedRecordsMemory.push(records[timeKey]);
+                    });
+                });
+            });
+        }
+
+        // Export All Telemetry Logs to Excel CSV
+        function exportLogsToCSV() {
+            if (loggedRecordsMemory.length === 0) {
+                alert('No telemetry records stored in memory yet to export!');
+                return;
+            }
+
+            let csvContent = "data:text/csv;charset=utf-8,";
+            csvContent += "Timestamp,MAC Address,Total Active kWh,Voltage AB (V),Current A (A),Total Power (kW),4-20mA Sensor,DI 1 (GPIO 41),DI 2 (GPIO 42)\n";
+
+            loggedRecordsMemory.forEach(r => {
+                const row = `"${r.timestamp}","${r.mac}",${r.kwh},${r.vAB},${r.iA},${r.kwTot},${r.analog_mA},${r.di1},${r.di2}`;
+                csvContent += row + "\n";
+            });
+
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", `Firebase_Telemetry_Export_${new Date().toISOString().substring(0, 10)}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
 
         document.addEventListener('DOMContentLoaded', () => {
             initChart();
             setupEventListeners();
             autoConnectMQTT();
+
+            // Load saved Firebase URL if available in LocalStorage
+            const savedFbUrl = localStorage.getItem('firebase_db_url');
+            if (savedFbUrl) {
+                document.getElementById('firebase-db-url').value = savedFbUrl;
+                initFirebase(savedFbUrl);
+            }
         });
 
         function setupEventListeners() {
@@ -1119,11 +1387,17 @@
             const disconnectBtn = document.getElementById('disconnect-mqtt-btn');
             const clearConsoleBtn = document.getElementById('clear-console-btn');
             const deviceSelectDropdown = document.getElementById('device-select-dropdown');
+            const exportCsvBtn = document.getElementById('export-csv-btn');
 
             toggleConfigBtn.addEventListener('click', () => configModal.classList.remove('hidden'));
             closeConfigBtn.addEventListener('click', () => configModal.classList.add('hidden'));
 
             connectBtn.addEventListener('click', () => {
+                const fbUrl = document.getElementById('firebase-db-url').value.trim();
+                if (fbUrl) {
+                    localStorage.setItem('firebase_db_url', fbUrl);
+                    initFirebase(fbUrl);
+                }
                 connectMQTT(document.getElementById('broker-url').value.trim());
                 configModal.classList.add('hidden');
             });
@@ -1138,6 +1412,8 @@
             clearConsoleBtn.addEventListener('click', () => {
                 document.getElementById('raw-json-console').innerText = '// Console cleared.';
             });
+
+            exportCsvBtn.addEventListener('click', exportLogsToCSV);
 
             deviceSelectDropdown.addEventListener('change', (e) => {
                 selectedMacAddress = e.target.value;
@@ -1158,9 +1434,9 @@
                 return;
             }
 
-            const username  = document.getElementById('mqtt-user').value.trim();
-            const password  = document.getElementById('mqtt-pass').value.trim();
-            const topic     = document.getElementById('mqtt-topic').value.trim();
+            const username = document.getElementById('mqtt-user').value.trim();
+            const password = document.getElementById('mqtt-pass').value.trim();
+            const topic = document.getElementById('mqtt-topic').value.trim();
 
             const urlToTry = targetBrokerUrl || DEFAULT_WEBSOCKET_URL;
             document.getElementById('broker-url').value = urlToTry;
@@ -1205,10 +1481,12 @@
                         const data = JSON.parse(messageStr);
 
                         const topicParts = receivedTopic.split('/');
-                        const macAddress = (topicParts.length >= 2 && topicParts[1] !== '+') 
-                                            ? topicParts[1] 
-                                            : 'UNKNOWN_MAC';
+                        const macAddress = (topicParts.length >= 2 && topicParts[1] !== '+')
+                            ? topicParts[1]
+                            : 'UNKNOWN_MAC';
 
+                        // Save to Firebase Cloud Database 24/7
+                        saveToFirebase(macAddress, data);
                         processDeviceTelemetry(macAddress, data, receivedTopic);
                         logToConsole(`[${new Date().toLocaleTimeString()}] Device [${macAddress}] on ${receivedTopic}\n${JSON.stringify(data, null, 2)}`);
 
@@ -1519,4 +1797,5 @@
         }
     </script>
 </body>
+
 </html>
