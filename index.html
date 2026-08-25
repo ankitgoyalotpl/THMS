@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32 Multi-Device 4G Gateway Telemetry Dashboard (Firebase Edition)</title>
+    <title>ESP32 Multi-Device 4G Gateway Telemetry Dashboard (IST Indian Time & Auto-Fit Excel Edition)</title>
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -23,7 +23,7 @@
 
     <style>
         /* --------------------------------------------------------------------------
-           DARK GLASSMORPHISM TELEMETRY DASHBOARD STYLES (FIREBASE EDITION)
+           DARK GLASSMORPHISM TELEMETRY DASHBOARD STYLES (INDIAN TIME EDITION)
            -------------------------------------------------------------------------- */
         :root {
             --bg-dark: #0a0e17;
@@ -809,9 +809,9 @@
 
             <!-- Global Connection & Device Selector Bar -->
             <div class="connection-bar">
-                <!-- Export CSV Download Button -->
+                <!-- Export Excel Download Button -->
                 <button class="btn btn-export" id="export-csv-btn">
-                    <i class="fa-solid fa-file-excel"></i> Export CSV Log
+                    <i class="fa-solid fa-file-excel"></i> Export Excel (.xls / IST Time)
                 </button>
 
                 <!-- Device Selector Dropdown -->
@@ -892,8 +892,9 @@
                     <!-- Firebase Realtime DB URL Input -->
                     <div class="form-group">
                         <label for="firebase-db-url">🔥 Firebase Realtime Database URL (Cloud 24/7 Sync)</label>
-                        <input type="text" id="firebase-db-url" value=""
-                            placeholder="https://console.firebase.google.com/u/2/project/oxymora-gateway/database/oxymora-gateway-default-rtdb/data/~2F">
+                        <input type="text" id="firebase-db-url"
+                            value="https://oxymora-gateway-default-rtdb.firebaseio.com"
+                            placeholder="https://oxymora-gateway-default-rtdb.firebaseio.com">
                         <small>Paste your Firebase Realtime DB URL here to auto-save and auto-sync history 24/7!</small>
                     </div>
 
@@ -1242,7 +1243,7 @@
         </main>
     </div>
 
-    <!-- EMBEDDED DASHBOARD JAVASCRIPT & FIREBASE SYNC ENGINE -->
+    <!-- EMBEDDED DASHBOARD JAVASCRIPT & FIREBASE COMPLETE 68-PARAM ENGINE -->
     <script>
         let mqttClient = null;
         let liveChart = null;
@@ -1258,6 +1259,25 @@
 
         const MAX_DATA_POINTS = 20;
 
+        // Convert UTC/ISO date to Indian Standard Time (IST - Asia/Kolkata)
+        function formatIndianTime(dateInput) {
+            try {
+                const date = dateInput ? new Date(dateInput) : new Date();
+                return date.toLocaleString('en-IN', {
+                    timeZone: 'Asia/Kolkata',
+                    day: '2-digit',
+                    month: '2-digit',
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: true
+                }).replace(',', '');
+            } catch (e) {
+                return new Date().toLocaleString();
+            }
+        }
+
         // --------------------------------------------------------------------------
         // 🔥 FIREBASE REALTIME DATABASE INITIALIZATION
         // --------------------------------------------------------------------------
@@ -1268,7 +1288,6 @@
             }
 
             try {
-                // Initialize Firebase App if not already initialized
                 if (!firebase.apps.length) {
                     firebase.initializeApp({
                         databaseURL: databaseUrl
@@ -1279,7 +1298,6 @@
                 updateFirebaseBadge(true, 'Firebase Active 🔥');
                 console.log('🔥 Firebase Realtime Database Linked Successfully!');
 
-                // Auto-fetch past historical logs from Firebase
                 fetchHistoryFromFirebase();
 
             } catch (e) {
@@ -1301,30 +1319,101 @@
             }
         }
 
-        // Save incoming Telemetry reading 24/7 to Firebase Cloud Database
+        // Save COMPLETE 68-Parameter Telemetry Reading 24/7 to Firebase & Memory
         function saveToFirebase(mac, data) {
-            if (!firebaseDb || !firebaseConnected) return;
-
             const timeKey = new Date().getTime();
             const record = {
-                timestamp: new Date().toISOString(),
+                timestamp_ist: formatIndianTime(new Date()),
+                timestamp_iso: new Date().toISOString(),
                 mac: mac,
-                kwh: data.energy?.tot_kwh ?? 0,
-                vAB: data.electrical?.vAB ?? 0,
-                iA: data.electrical?.iA ?? 0,
-                kwTot: data.electrical?.kwTot ?? 0,
+
+                // Hardware & Signals
+                csq: data.sys?.csq ?? 0,
+                rssi: data.sys?.rssi ?? 0,
+                free_heap: data.sys?.free_heap ?? 0,
+
+                // IO Sensors
+                di1_gpio41: data.digital_input?.di1_gpio41 ?? 0,
+                di2_gpio42: data.digital_input?.di2_gpio42 ?? 0,
                 analog_mA: data.analog?.mA_val ?? 0,
-                di1: data.digital_input?.di1_gpio41 ?? 0,
-                di2: data.digital_input?.di2_gpio42 ?? 0,
-                raw_json: JSON.stringify(data)
+                analog_adc: data.analog?.raw_adc ?? 0,
+
+                // Energy Meters (Reg 2700 - 2723)
+                imp_kwh: data.energy?.imp_kwh ?? 0,
+                exp_kwh: data.energy?.exp_kwh ?? 0,
+                tot_kwh: data.energy?.tot_kwh ?? 0,
+                net_kwh: data.energy?.net_kwh ?? 0,
+                tot_kvarh: data.energy?.tot_kvarh ?? 0,
+                net_kvarh: data.energy?.net_kvarh ?? 0,
+                tot_kvah: data.energy?.tot_kvah ?? 0,
+                net_kvah: data.energy?.net_kvah ?? 0,
+
+                // Phase A (Reg 3000 - 3111)
+                iA: data.electrical?.iA ?? 0,
+                vAN: data.electrical?.vAN ?? 0,
+                kwA: data.electrical?.kwA ?? 0,
+                kvarA: data.electrical?.kvarA ?? 0,
+                kvaA: data.electrical?.kvaA ?? 0,
+                pfA: data.electrical?.pfA ?? 0,
+                iUnbA: data.electrical?.iUnbA ?? 0,
+
+                // Phase B
+                iB: data.electrical?.iB ?? 0,
+                vBN: data.electrical?.vBN ?? 0,
+                kwB: data.electrical?.kwB ?? 0,
+                kvarB: data.electrical?.kvarB ?? 0,
+                kvaB: data.electrical?.kvaB ?? 0,
+                pfB: data.electrical?.pfB ?? 0,
+                iUnbB: data.electrical?.iUnbB ?? 0,
+
+                // Phase C
+                iC: data.electrical?.iC ?? 0,
+                vCN: data.electrical?.vCN ?? 0,
+                kwC: data.electrical?.kwC ?? 0,
+                kvarC: data.electrical?.kvarC ?? 0,
+                kvaC: data.electrical?.kvaC ?? 0,
+                pfC: data.electrical?.pfC ?? 0,
+                iUnbC: data.electrical?.iUnbC ?? 0,
+
+                // System Totals & Averages
+                iAvg: data.electrical?.iAvg ?? 0,
+                vLineAvg: data.electrical?.vLineAvg ?? 0,
+                kwTot: data.electrical?.kwTot ?? 0,
+                kvarTot: data.electrical?.kvarTot ?? 0,
+                kvaTot: data.electrical?.kvaTot ?? 0,
+                pfTot: data.electrical?.pfTot ?? 0,
+                freq: data.electrical?.freq ?? 0,
+
+                // Voltages & Currents
+                vAB: data.electrical?.vAB ?? 0,
+                vBC: data.electrical?.vBC ?? 0,
+                vCA: data.electrical?.vCA ?? 0,
+                iN: data.electrical?.iN ?? 0,
+                iG: data.electrical?.iG ?? 0,
+                iUnbMax: data.electrical?.iUnbMax ?? 0,
+                vUnbLLMax: data.electrical?.vUnbLLMax ?? 0,
+                vUnbLNMax: data.electrical?.vUnbLNMax ?? 0,
+
+                // THD Harmonics (Reg 21300 - 21335)
+                thd_iA: data.thd?.thd_iA ?? 0,
+                thd_iB: data.thd?.thd_iB ?? 0,
+                thd_iC: data.thd?.thd_iC ?? 0,
+                thd_vAB: data.thd?.thd_vAB ?? 0,
+                thd_vBC: data.thd?.thd_vBC ?? 0,
+                thd_vCA: data.thd?.thd_vCA ?? 0,
+                thd_vAN: data.thd?.thd_vAN ?? 0,
+                thd_vBN: data.thd?.thd_vBN ?? 0,
+                thd_vCN: data.thd?.thd_vCN ?? 0
             };
 
-            // Push under path: /telemetry_history/<MACADDRESS>/<TIMEKEY>
-            firebaseDb.ref(`telemetry_history/${mac}/${timeKey}`).set(record);
             loggedRecordsMemory.push(record);
+
+            if (firebaseDb && firebaseConnected) {
+                firebaseDb.ref(`telemetry_history/${mac}/${timeKey}`).set(record);
+            }
         }
 
-        // Fetch past history logs from Firebase when dashboard opens
+        // Fetch past history logs from Firebase
         function fetchHistoryFromFirebase() {
             if (!firebaseDb) return;
 
@@ -1342,25 +1431,71 @@
             });
         }
 
-        // Export All Telemetry Logs to Excel CSV
+        // Export AUTO-FIT Excel (.xls HTML Spreadsheet) with Indian Time (IST)
         function exportLogsToCSV() {
             if (loggedRecordsMemory.length === 0) {
                 alert('No telemetry records stored in memory yet to export!');
                 return;
             }
 
-            let csvContent = "data:text/csv;charset=utf-8,";
-            csvContent += "Timestamp,MAC Address,Total Active kWh,Voltage AB (V),Current A (A),Total Power (kW),4-20mA Sensor,DI 1 (GPIO 41),DI 2 (GPIO 42)\n";
+            const headers = [
+                "Timestamp (Indian IST)", "MAC Address", "CSQ", "RSSI (dBm)", "Free Heap (Bytes)",
+                "DI 1 (GPIO 41)", "DI 2 (GPIO 42)", "4-20mA Sensor (mA)", "Raw ADC",
+                "Import Active Energy (kWh)", "Export Active Energy (kWh)", "Total Active Energy (kWh)", "Net Active Energy (kWh)",
+                "Total Reactive Energy (kVARh)", "Net Reactive Energy (kVARh)", "Total Apparent Energy (kVAh)", "Net Apparent Energy (kVAh)",
+                "Current A (A)", "Voltage AN (V)", "Active Power A (kW)", "Reactive Power A (kVAR)", "Apparent Power A (kVA)", "Power Factor A", "Unbalance A (%)",
+                "Current B (A)", "Voltage BN (V)", "Active Power B (kW)", "Reactive Power B (kVAR)", "Apparent Power B (kVA)", "Power Factor B", "Unbalance B (%)",
+                "Current C (A)", "Voltage CN (V)", "Active Power C (kW)", "Reactive Power C (kVAR)", "Apparent Power C (kVA)", "Power Factor C", "Unbalance C (%)",
+                "Avg Current (A)", "Avg Line Voltage (V)", "Total Active Power (kW)", "Total Reactive Power (kVAR)", "Total Apparent Power (kVA)", "Total Power Factor", "Frequency (Hz)",
+                "Voltage AB (V)", "Voltage BC (V)", "Voltage CA (V)", "Neutral Current (A)", "Ground Current (A)", "Worst Current Unbalance (%)", "Worst Voltage Unbalance LL (%)", "Worst Voltage Unbalance LN (%)",
+                "THD Current A (%)", "THD Current B (%)", "THD Current C (%)", "THD Voltage AB (%)", "THD Voltage BC (%)", "THD Voltage CA (%)", "THD Voltage AN (%)", "THD Voltage BN (%)", "THD Voltage CN (%)"
+            ];
+
+            // Build Styled HTML Table for Excel (.xls) with Auto Column Padding & IST Formatting
+            let tableHtml = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+            <head><meta charset="UTF-8">
+            <!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>Telemetry Export</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->
+            <style>
+                table { border-collapse: collapse; width: 100%; font-family: 'Calibri', 'Outfit', sans-serif; }
+                th { background-color: #121a2c; color: #00f2fe; font-weight: bold; border: 1px solid #2d3d5a; padding: 10px 18px; text-align: center; font-size: 13px; white-space: nowrap; }
+                td { border: 1px solid #e0e0e0; padding: 8px 16px; text-align: center; font-size: 12px; white-space: nowrap; mso-number-format:"\@"; }
+                tr:nth-child(even) { background-color: #f9fbfd; }
+            </style>
+            </head><body><table><thead><tr>`;
+
+            headers.forEach(h => {
+                tableHtml += `<th>${h}</th>`;
+            });
+            tableHtml += `</tr></thead><tbody>`;
 
             loggedRecordsMemory.forEach(r => {
-                const row = `"${r.timestamp}","${r.mac}",${r.kwh},${r.vAB},${r.iA},${r.kwTot},${r.analog_mA},${r.di1},${r.di2}`;
-                csvContent += row + "\n";
+                const istTime = r.timestamp_ist || formatIndianTime(r.timestamp_iso || r.timestamp);
+                const rowCells = [
+                    istTime, r.mac, r.csq, r.rssi, r.free_heap,
+                    r.di1_gpio41, r.di2_gpio42, r.analog_mA, r.analog_adc,
+                    r.imp_kwh, r.exp_kwh, r.tot_kwh, r.net_kwh,
+                    r.tot_kvarh, r.net_kvarh, r.tot_kvah, r.net_kvah,
+                    r.iA, r.vAN, r.kwA, r.kvarA, r.kvaA, r.pfA, r.iUnbA,
+                    r.iB, r.vBN, r.kwB, r.kvarB, r.kvaB, r.pfB, r.iUnbB,
+                    r.iC, r.vCN, r.kwC, r.kvarC, r.kvaC, r.pfC, r.iUnbC,
+                    r.iAvg, r.vLineAvg, r.kwTot, r.kvarTot, r.kvaTot, r.pfTot, r.freq,
+                    r.vAB, r.vBC, r.vCA, r.iN, r.iG, r.iUnbMax, r.vUnbLLMax, r.vUnbLNMax,
+                    r.thd_iA, r.thd_iB, r.thd_iC, r.thd_vAB, r.thd_vBC, r.thd_vCA, r.thd_vAN, r.thd_vBN, r.thd_vCN
+                ];
+
+                tableHtml += `<tr>`;
+                rowCells.forEach(val => {
+                    tableHtml += `<td>${val !== undefined && val !== null ? val : ''}</td>`;
+                });
+                tableHtml += `</tr>`;
             });
 
-            const encodedUri = encodeURI(csvContent);
+            tableHtml += `</tbody></table></body></html>`;
+
+            const blob = new Blob([tableHtml], { type: 'application/vnd.ms-excel;charset=utf-8' });
             const link = document.createElement("a");
-            link.setAttribute("href", encodedUri);
-            link.setAttribute("download", `Firebase_Telemetry_Export_${new Date().toISOString().substring(0, 10)}.csv`);
+            link.href = URL.createObjectURL(blob);
+            link.download = `Telemetry_IST_Export_${new Date().toISOString().substring(0, 10)}.xls`;
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
@@ -1371,8 +1506,7 @@
             setupEventListeners();
             autoConnectMQTT();
 
-            // Load saved Firebase URL if available in LocalStorage
-            const savedFbUrl = localStorage.getItem('firebase_db_url');
+            const savedFbUrl = localStorage.getItem('firebase_db_url') || 'https://oxymora-gateway-default-rtdb.firebaseio.com';
             if (savedFbUrl) {
                 document.getElementById('firebase-db-url').value = savedFbUrl;
                 initFirebase(savedFbUrl);
@@ -1485,7 +1619,6 @@
                             ? topicParts[1]
                             : 'UNKNOWN_MAC';
 
-                        // Save to Firebase Cloud Database 24/7
                         saveToFirebase(macAddress, data);
                         processDeviceTelemetry(macAddress, data, receivedTopic);
                         logToConsole(`[${new Date().toLocaleTimeString()}] Device [${macAddress}] on ${receivedTopic}\n${JSON.stringify(data, null, 2)}`);
