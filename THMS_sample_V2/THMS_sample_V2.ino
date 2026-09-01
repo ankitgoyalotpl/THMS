@@ -1,0 +1,1316 @@
+// ============================================================================
+// ESP32 SCHNEIDER 66-REG + TPR-702 TEMP 4G MQTT GATEWAY + RTC SD CARD LOGGER
+// ============================================================================
+
+#include <Arduino.h>
+#include <PPP.h>
+#include <WiFi.h>
+#include <WebServer.h>     // 📌 Local Web Server Library
+#include <NetworkClientSecure.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include "FS.h"
+#include "SD.h"
+#include "SPI.h"
+#include <Wire.h>
+#include <Preferences.h>   // 📌 Flash Storage for Tap Counter
+#include <esp_task_wdt.h>   // ESP32 Hardware Watchdog Library
+
+// --------------------------------------------------------------------------
+// 📌 DIGITAL INPUT PINS CONFIG (GPIO 41 & GPIO 42)
+// --------------------------------------------------------------------------
+#define DI_PIN_1  41   // Digital Input 1 (GPIO 41)
+#define DI_PIN_2  42   // Digital Input 2 (GPIO 42)
+#define DI_PIN_3  38   // 👈 Naya: Digital Input 3 (Apni PCB ke hisaab se pin daalein)
+#define DI_PIN_4  39   // 👈 Naya: Digital Input 4
+#define DI_PIN_5  40   // 👈 Naya: Digital Input 5
+#define DI_PIN_6  14    // 👈 Naya: Digital Input 6
+
+
+// --------------------------------------------------------------------------
+// SD CARD & DS3231 RTC CONFIG
+// --------------------------------------------------------------------------
+#define SD_SCK  12
+#define SD_MISO 13
+#define SD_MOSI 11
+#define SD_CS   21     // SD CS Pin (Board GPIO 21)
+
+#define I2C_SDA 8
+#define I2C_SCL 9
+#define RTC_I2C_ADDR 0x68
+#define WDT_TIMEOUT  60     // 60 Seconds Watchdog Timeout
+
+const char* logFileName = "/telemetry_log.txt";
+bool sd_card_mounted = false;
+File currentLogFile;
+
+// --------------------------------------------------------------------------
+// MODEM / PPP CONFIG
+// --------------------------------------------------------------------------
+#define PPP_MODEM_APN        "airtelgprs.com"
+#define PPP_MODEM_PIN        NULL              
+
+#define PPP_MODEM_TX_PIN     4
+#define PPP_MODEM_RX_PIN     5
+#define PPP_MODEM_RST_PIN    3
+#define PPP_MODEM_RST_LOW    false   
+#define PPP_MODEM_RST_DELAY  200
+
+#define PPP_MODEM_MODEL      PPP_MODEM_BG96
+
+// --------------------------------------------------------------------------
+// 📌 4-20mA ANALOG SENSOR PIN
+// --------------------------------------------------------------------------
+#define ANALOG_4_20MA_PIN   1
+#define OLTC_TAP_PIN        10   // 👈 NAYA: Dedicated OLTC Tap & Counter (GPIO 10)
+
+int   analog_raw_adc    = 0;
+float analog_4_20mA_val = 0.0;
+float oltc_live_voltage = 0.0; // 👈 Pin 10 ka Live Measured Voltage (Volts)
+int   last_valid_rssi   = 16;
+
+// 📌 OLTC Structure & Flash Storage
+struct OLTCData {
+  int      currentTap;       // 1 to 17
+  uint32_t tapCounter;       // Total Operations (Permanent Flash)
+  bool     sensor_ok;
+};
+
+OLTCData    oltcData;
+Preferences nvsStorage;
+int         lastConfirmedTap  = -1;
+int         candidateNewTap   = -1;
+uint32_t    tapDebounceTimer  = 0;
+char        mqtt_sub_topic[64]; // transformer/<MAC>/tx (Dashboard Commands)
+
+
+// --------------------------------------------------------------------------
+// MQTT CONFIG
+// --------------------------------------------------------------------------
+const char* mqtt_broker = "otplai.com";
+const int   mqtt_port   = 8883;
+const char* mqtt_user   = "oxmo";
+const char* mqtt_pass   = "123456789";
+const char* device_id   = "OXMO_GW_01";
+char        mqtt_topic[64];
+
+// --------------------------------------------------------------------------
+// RS485 & MODBUS SLAVE CONFIG
+// --------------------------------------------------------------------------
+#define RS485_RX_PIN    18
+#define RS485_TX_PIN    17
+// ✅ Ab aisa kar dijiye:
+#define SCHNEIDER_1_ID  1    // Meter 1 (HV / Incomer)
+#define SCHNEIDER_2_ID  3    // 👈 Naya: Meter 2 (LV / Outgoing)
+#define TPR702_ID       2    // TPR-702 Temp Controller
+#define MODBUS_BAUD     9600
+
+HardwareSerial RS485Serial(1);
+
+NetworkClientSecure secureClient;
+PubSubClient        mqttClient(secureClient);
+
+volatile bool ppp_got_ip = false;
+bool is_meter_data_available = false;
+
+// --------------------------------------------------------------------------
+// DATA STRUCTS FOR SCHNEIDER METER (66 REGISTERS)
+// --------------------------------------------------------------------------
+struct EnergyData {
+  float import_kWh, export_kWh, totalActive_kWh, netActive_kWh;
+  float reactiveDeliv_kVARh, reactiveRecv_kVARh, totalReactive_kVARh, netReactive_kVARh;
+  float apparentDeliv_kVAh, apparentRecv_kVAh, totalApparent_kVAh, netApparent_kVAh;
+};
+
+struct InstantaneousData {
+  float currentA, currentB, currentC, neutralCurrent, groundCurrent, avgCurrent;
+  float currentUnbalanceA, currentUnbalanceB, currentUnbalanceC, worstCurrentUnbalance;
+  float voltageAB, voltageBC, voltageCA, avgLineVoltage;
+  float voltageAN, voltageBN, voltageCN, voltageNG, avgPhaseVoltage;
+  float voltageUnbalanceAB, voltageUnbalanceBC, voltageUnbalanceCA, worstVoltageUnbalanceLL;
+  float voltageUnbalanceAN, voltageUnbalanceBN, voltageUnbalanceCN, worstVoltageUnbalanceLN;
+  float activePowerA, activePowerB, activePowerC, totalActivePower;
+  float reactivePowerA, reactivePowerB, reactivePowerC, totalReactivePower;
+  float apparentPowerA, apparentPowerB, apparentPowerC, totalApparentPower;
+  float powerFactorA, powerFactorB, powerFactorC, totalPowerFactor;
+  float frequency;
+};
+
+struct THDData {
+  float thdCurrentA, thdCurrentB, thdCurrentC;
+  float thdVoltageAB, thdVoltageBC, thdVoltageCA;
+  float thdVoltageAN, thdVoltageBN, thdVoltageCN;
+};
+
+// --------------------------------------------------------------------------
+// 📌 DATA STRUCT FOR TPR-702 TRANSFORMER TEMPERATURE CONTROLLER
+// --------------------------------------------------------------------------
+struct TPR702Data {
+  uint16_t oilTemp;  // Reg 40001 (Offset 0x0000)
+  uint16_t hvTemp;   // Reg 40002 (Offset 0x0001)
+  uint16_t lvTemp;   // Reg 40003 (Offset 0x0002)
+  bool is_valid;
+};
+
+// 📌 METER 1 DATA STRUCTS (Slave ID: 1)
+EnergyData        m1_sec1;
+InstantaneousData m1_sec2;
+THDData           m1_sec3;
+bool              m1_online = false;
+
+// 📌 METER 2 DATA STRUCTS (Slave ID: 3 - Naya Meter)
+EnergyData        m2_sec1;
+InstantaneousData m2_sec2;
+THDData           m2_sec3;
+bool              m2_online = false;
+
+// TPR-702
+TPR702Data        tprData;
+
+// 🆔 Read True Hardware Factory MAC Address from ESP32 eFuse
+String getESP32HardwareMAC() {
+  uint64_t chipid = ESP.getEfuseMac();
+  char macStr[13];
+  snprintf(macStr, sizeof(macStr), "%02X%02X%02X%02X%02X%02X",
+           (uint8_t)(chipid >> 40),
+           (uint8_t)(chipid >> 32),
+           (uint8_t)(chipid >> 24),
+           (uint8_t)(chipid >> 16),
+           (uint8_t)(chipid >> 8),
+           (uint8_t)chipid);
+  return String(macStr);
+}
+
+// 🕒 RTC HELPER
+String getFormattedTime() {
+    Wire.beginTransmission(RTC_I2C_ADDR);
+    Wire.write(0x00);
+    if (Wire.endTransmission() != 0) return "[RTC ERR]";
+
+    Wire.requestFrom(RTC_I2C_ADDR, 7);
+    if (Wire.available() < 7) return "[RTC TIMEOUT]";
+
+    int second = (Wire.read() & 0x7F); second = (second / 16 * 10) + (second % 16);
+    int minute = Wire.read(); minute = (minute / 16 * 10) + (minute % 16);
+    int hour   = (Wire.read() & 0x3F); hour = (hour / 16 * 10) + (hour % 16);
+    Wire.read();
+    int day    = Wire.read(); day = (day / 16 * 10) + (day % 16);
+    int month  = (Wire.read() & 0x1F); month = (month / 16 * 10) + (month % 16);
+    int year   = Wire.read(); year = (year / 16 * 10) + (year % 16) + 2000;
+
+    char buffer[30];
+    sprintf(buffer, "[%04d-%02d-%02d %02d:%02d:%02d]", year, month, day, hour, minute, second);
+    return String(buffer);
+}
+
+byte decToBcd(byte val) {
+    return ((val / 10 * 16) + (val % 10));
+}
+
+// 💾 DUAL LOGGING HELPER (Serial + SD Card simultaneously)
+void logPrint(String text) {
+  Serial.print(text);
+  if (sd_card_mounted && currentLogFile) {
+    currentLogFile.print(text);
+  }
+}
+
+void logPrintln(String text) {
+  Serial.println(text);
+  if (sd_card_mounted && currentLogFile) {
+    currentLogFile.println(text);
+  }
+}
+
+void setDS3231Time(int year, int month, int day, int hour, int minute, int second) {
+    Wire.beginTransmission(RTC_I2C_ADDR);
+    Wire.write(0x00);
+    Wire.write(decToBcd(second));
+    Wire.write(decToBcd(minute));
+    Wire.write(decToBcd(hour));
+    Wire.write(decToBcd(1));
+    Wire.write(decToBcd(day));
+    Wire.write(decToBcd(month));
+    Wire.write(decToBcd(year - 2000));
+    Wire.endTransmission();
+    Serial.printf("\n🕒 [RTC] Time successfully set to: %04d-%02d-%02d %02d:%02d:%02d\n\n", year, month, day, hour, minute, second);
+}
+
+// 💾 SD LOG HELPER
+void logDataToSD(String logMsg) {
+  if (!sd_card_mounted) return;
+  
+  File logFile = SD.open(logFileName, FILE_APPEND);
+  if (logFile) {
+    String formattedLine = getFormattedTime() + " " + logMsg;
+    logFile.println(formattedLine);
+    logFile.close();
+  }
+}
+
+// --------------------------------------------------------------------------
+// 📌 1. READ GENERAL 4-20mA SENSOR (GPIO 1)
+// --------------------------------------------------------------------------
+void read4to20mASensor() {
+  analog_raw_adc = analogRead(ANALOG_4_20MA_PIN);
+  float voltage = (analog_raw_adc / 4095.0) * 3.3;
+  
+  // Standard 4-20mA Calculation (0.44V = 4mA, 3.13V = 20mA)
+  if (voltage < 0.25) {
+    analog_4_20mA_val = 0.0; // Wire cut / Disconnected
+  } else {
+    analog_4_20mA_val = 4.0 + ((voltage - 0.44) / 2.69) * 16.0;
+    if (analog_4_20mA_val < 0.0)  analog_4_20mA_val = 0.0;
+    if (analog_4_20mA_val > 24.0) analog_4_20mA_val = 24.0;
+  }
+}
+
+// --------------------------------------------------------------------------
+// 📌 2. READ DEDICATED OLTC TAP & COUNTER (GPIO 10) - NEAREST MATCH TABLE
+// --------------------------------------------------------------------------
+static int      stableTapCandidate = -1;
+static uint32_t tapCandidateTimer  = 0;
+
+// 17 Taps ke Exact Standard Voltages:
+const float TAP_VOLTAGES[17] = {
+  0.000, // Tap 1
+  0.190, // Tap 2
+  0.380, // Tap 3
+  0.575, // Tap 4
+  0.770, // Tap 5
+  0.960, // Tap 6
+  1.160, // Tap 7
+  1.350, // Tap 8
+  1.540, // Tap 9  👈 (1.74V iske sabse kareeb hai)
+  1.740, // Tap 10
+  1.930, // Tap 11
+  2.120, // Tap 12
+  2.320, // Tap 13
+  2.510, // Tap 14 👈 (2.55V aate hi yeh activate hoga)
+  2.710, // Tap 15
+  2.910, // Tap 16
+  3.100  // Tap 17
+};
+
+// 📌 Function: Jo Tap sabse kareeb hoga, wahi choose karega
+int getNearestTap(float v) {
+  int bestTap = 1;
+  float minDiff = 999.0;
+  for (int i = 0; i < 17; i++) {
+    float diff = abs(v - TAP_VOLTAGES[i]);
+    if (diff < minDiff) {
+      minDiff = diff;
+      bestTap = i + 1;
+    }
+  }
+  return bestTap;
+}
+
+void readOLTCSensor() {
+  delay(10);
+
+  // 📌 30 Samples ka Average (ESP32 Hardware Factory Millivolts)
+  long sumMv = 0;
+  for (int i = 0; i < 30; i++) {
+    sumMv += analogReadMilliVolts(OLTC_TAP_PIN); // 👈 Multimeter se 100% matched
+    delayMicroseconds(200);
+  }
+   float voltage     = (sumMv / 30.0) / 1000.0;   // 👈 Exact Volts
+  oltc_live_voltage = voltage;                   // 👈 MQTT aur Web ke liye save
+
+  // Debug Serial: Multimeter aur Code ka voltage live dekhein
+  Serial.printf("🔍 [TAP LIVE] Voltage: %.3f V | Nearest: Tap %d | Active: Tap %d | Ops: %u\n", 
+                voltage, getNearestTap(voltage), oltcData.currentTap, oltcData.tapCounter);
+
+  // Wire Cut / Disconnect check (<0.30V ya >3.35V)
+  if (voltage > 3.35) {
+    oltcData.sensor_ok = false;
+    stableTapCandidate = -1;
+    return;
+  }
+  oltcData.sensor_ok = true;
+
+  // 🎯 Nearest Tap Nikaalein:
+  int calculatedTap = getNearestTap(voltage);
+
+  // First Bootup
+  if (lastConfirmedTap == -1) {
+    lastConfirmedTap    = calculatedTap;
+    oltcData.currentTap = calculatedTap;
+    return;
+  }
+
+  // 🛡️ SYNCED TAP & COUNTER LOGIC (1.5s Stable Hold):
+  if (calculatedTap != lastConfirmedTap) {
+    if (calculatedTap != stableTapCandidate) {
+      stableTapCandidate = calculatedTap;
+      tapCandidateTimer  = millis();
+    } else if (millis() - tapCandidateTimer >= 1500) { // 1.5 second hold
+      int stepsMoved = abs(stableTapCandidate - lastConfirmedTap);
+      
+      lastConfirmedTap    = stableTapCandidate;
+      oltcData.currentTap = stableTapCandidate;
+
+      oltcData.tapCounter += stepsMoved;
+      nvsStorage.putUInt("tap_count", oltcData.tapCounter);
+
+      Serial.printf("\n⚡ [OLTC SYNCED EVENT] New Tap: %d | Steps: +%d | Total Ops: %u\n\n", 
+                    oltcData.currentTap, stepsMoved, oltcData.tapCounter);
+
+      stableTapCandidate = -1;
+    }
+  } else {
+    stableTapCandidate = -1;
+  }
+}
+
+
+
+
+uint16_t modbusCRC(const uint8_t *buf, size_t len) {
+  uint16_t crc = 0xFFFF;
+  for (size_t pos = 0; pos < len; pos++) {
+    crc ^= buf[pos];
+    for (uint8_t i = 0; i < 8; i++) {
+      if (crc & 0x0001) crc = (crc >> 1) ^ 0xA001;
+      else crc >>= 1;
+    }
+  }
+  return crc;
+}
+
+void clearRX() { while (RS485Serial.available()) RS485Serial.read(); }
+
+// --------------------------------------------------------------------------
+// READ SCHNEIDER MODBUS HOLDING REGISTERS (Function Code 0x03)
+// --------------------------------------------------------------------------
+bool readHoldingRegistersSchneider(uint8_t slave, uint16_t startRegister, uint16_t quantity, uint16_t *outRegs) {
+  if (quantity == 0 || quantity > 120) return false;
+  uint16_t address = startRegister - 1;
+  uint8_t request[8];
+  request[0] = slave; request[1] = 0x03;
+  request[2] = highByte(address); request[3] = lowByte(address);
+  request[4] = highByte(quantity); request[5] = lowByte(quantity);
+  uint16_t crc = modbusCRC(request, 6);
+  request[6] = lowByte(crc); request[7] = highByte(crc);
+
+  clearRX();
+  RS485Serial.write(request, sizeof(request));
+  RS485Serial.flush();
+  delay(5);
+
+  const uint16_t expectedLength = 5 + quantity * 2;
+  uint8_t response[255];
+  uint16_t received = 0;
+  uint32_t t0 = millis();
+  while ((millis() - t0) < 1000 && received < expectedLength) {
+    while (RS485Serial.available() && received < sizeof(response)) {
+      response[received++] = RS485Serial.read();
+    }
+  }
+  if (received < 5 || response[0] != slave || (response[1] & 0x80) || response[1] != 0x03) return false;
+  uint16_t byteCount = response[2];
+  if (byteCount != quantity * 2) return false;
+  uint16_t frameLength = 3 + byteCount + 2;
+  if (received < frameLength) return false;
+  uint16_t rxCRC = (uint16_t)response[frameLength - 2] | ((uint16_t)response[frameLength - 1] << 8);
+  if (rxCRC != modbusCRC(response, frameLength - 2)) return false;
+  for (uint16_t i = 0; i < quantity; i++) {
+    outRegs[i] = ((uint16_t)response[3 + i * 2] << 8) | response[4 + i * 2];
+  }
+  return true;
+}
+
+float makeFloat32FromRegs(const uint16_t *r) {
+  uint32_t u = ((uint32_t)r[0] << 16) | r[1];
+  float f;
+  memcpy(&f, &u, sizeof(f));
+  return f;
+}
+
+// --------------------------------------------------------------------------
+// 📌 READ TPR-702 TEMPERATURE CONTROLLER REGISTERS (40001, 40002, 40003)
+// --------------------------------------------------------------------------
+bool readTPR702(uint8_t slaveId, uint16_t &oilTemp, uint16_t &hvTemp, uint16_t &lvTemp) {
+  uint8_t request[8];
+  request[0] = slaveId;
+  request[1] = 0x03;          // Function Code 03
+  request[2] = 0x00;          // Start Address High Byte (0x0000 = Reg 40001)
+  request[3] = 0x00;          // Start Address Low Byte
+  request[4] = 0x00;          // Quantity High Byte
+  request[5] = 0x03;          // Quantity Low Byte (Read 3 Registers)
+
+  uint16_t crc = modbusCRC(request, 6);
+  request[6] = lowByte(crc);
+  request[7] = highByte(crc);
+
+  clearRX();
+  RS485Serial.write(request, sizeof(request));
+  RS485Serial.flush();
+
+  uint8_t response[11];
+  uint8_t receivedBytes = 0;
+  uint32_t startTime = millis();
+
+  while ((millis() - startTime) < 1000) {
+    while (RS485Serial.available()) {
+      if (receivedBytes < sizeof(response)) {
+        response[receivedBytes++] = RS485Serial.read();
+      } else {
+        RS485Serial.read();
+      }
+    }
+    if (receivedBytes >= 11) break;
+  }
+
+  if (receivedBytes != 11 || response[0] != slaveId || (response[1] & 0x80) || response[1] != 0x03 || response[2] != 6) {
+    return false;
+  }
+
+  uint16_t rxCRC = response[9] | ((uint16_t)response[10] << 8);
+  if (rxCRC != modbusCRC(response, 9)) return false;
+
+  oilTemp = ((uint16_t)response[3] << 8) | response[4];
+  hvTemp  = ((uint16_t)response[5] << 8) | response[6];
+  lvTemp  = ((uint16_t)response[7] << 8) | response[8];
+
+  return true;
+}
+
+// --------------------------------------------------------------------------
+// UNIVERSAL FUNCTION: READ ANY SCHNEIDER METER (66 REGISTERS)
+// --------------------------------------------------------------------------
+bool readSchneiderMeter(uint8_t slaveId, EnergyData &e, InstantaneousData &inst, THDData &thd) {
+  uint16_t buffer[120];
+
+  // 1. SECTION 1: Energy (2700 - 2723)
+  bool s1_ok = readHoldingRegistersSchneider(slaveId, 2700, 24, buffer);
+  if (s1_ok) {
+    e.import_kWh          = makeFloat32FromRegs(&buffer[0]);
+    e.export_kWh          = makeFloat32FromRegs(&buffer[2]);
+    e.totalActive_kWh     = makeFloat32FromRegs(&buffer[4]);
+    e.netActive_kWh       = makeFloat32FromRegs(&buffer[6]);
+    e.reactiveDeliv_kVARh = makeFloat32FromRegs(&buffer[8]);
+    e.reactiveRecv_kVARh  = makeFloat32FromRegs(&buffer[10]);
+    e.totalReactive_kVARh = makeFloat32FromRegs(&buffer[12]);
+    e.netReactive_kVARh   = makeFloat32FromRegs(&buffer[14]);
+    e.apparentDeliv_kVAh  = makeFloat32FromRegs(&buffer[16]);
+    e.apparentRecv_kVAh   = makeFloat32FromRegs(&buffer[18]);
+    e.totalApparent_kVAh  = makeFloat32FromRegs(&buffer[20]);
+    e.netApparent_kVAh    = makeFloat32FromRegs(&buffer[22]);
+  }
+  delay(40);
+
+  // 2. SECTION 2: Instantaneous Electrical (3000 - 3111)
+  bool s2_ok = readHoldingRegistersSchneider(slaveId, 3000, 112, buffer);
+  if (s2_ok) {
+    inst.currentA              = makeFloat32FromRegs(&buffer[3000 - 3000]);
+    inst.currentB              = makeFloat32FromRegs(&buffer[3002 - 3000]);
+    inst.currentC              = makeFloat32FromRegs(&buffer[3004 - 3000]);
+    inst.neutralCurrent        = makeFloat32FromRegs(&buffer[3006 - 3000]);
+    inst.groundCurrent         = makeFloat32FromRegs(&buffer[3008 - 3000]);
+    inst.avgCurrent            = makeFloat32FromRegs(&buffer[3010 - 3000]);
+    inst.currentUnbalanceA     = makeFloat32FromRegs(&buffer[3012 - 3000]);
+    inst.currentUnbalanceB     = makeFloat32FromRegs(&buffer[3014 - 3000]);
+    inst.currentUnbalanceC     = makeFloat32FromRegs(&buffer[3016 - 3000]);
+    inst.worstCurrentUnbalance = makeFloat32FromRegs(&buffer[3018 - 3000]);
+
+    inst.voltageAB             = makeFloat32FromRegs(&buffer[3020 - 3000]);
+    inst.voltageBC             = makeFloat32FromRegs(&buffer[3022 - 3000]);
+    inst.voltageCA             = makeFloat32FromRegs(&buffer[3024 - 3000]);
+    inst.avgLineVoltage        = makeFloat32FromRegs(&buffer[3026 - 3000]);
+
+    inst.voltageAN             = makeFloat32FromRegs(&buffer[3028 - 3000]);
+    inst.voltageBN             = makeFloat32FromRegs(&buffer[3030 - 3000]);
+    inst.voltageCN             = makeFloat32FromRegs(&buffer[3032 - 3000]);
+    inst.voltageNG             = makeFloat32FromRegs(&buffer[3034 - 3000]);
+    inst.avgPhaseVoltage       = makeFloat32FromRegs(&buffer[3036 - 3000]);
+
+    inst.voltageUnbalanceAB     = makeFloat32FromRegs(&buffer[3038 - 3000]);
+    inst.voltageUnbalanceBC     = makeFloat32FromRegs(&buffer[3040 - 3000]);
+    inst.voltageUnbalanceCA     = makeFloat32FromRegs(&buffer[3042 - 3000]);
+    inst.worstVoltageUnbalanceLL= makeFloat32FromRegs(&buffer[3044 - 3000]);
+    inst.voltageUnbalanceAN     = makeFloat32FromRegs(&buffer[3046 - 3000]);
+    inst.voltageUnbalanceBN     = makeFloat32FromRegs(&buffer[3048 - 3000]);
+    inst.voltageUnbalanceCN     = makeFloat32FromRegs(&buffer[3050 - 3000]);
+    inst.worstVoltageUnbalanceLN= makeFloat32FromRegs(&buffer[3052 - 3000]);
+
+    inst.activePowerA          = makeFloat32FromRegs(&buffer[3054 - 3000]);
+    inst.activePowerB          = makeFloat32FromRegs(&buffer[3056 - 3000]);
+    inst.activePowerC          = makeFloat32FromRegs(&buffer[3058 - 3000]);
+    inst.totalActivePower       = makeFloat32FromRegs(&buffer[3060 - 3000]);
+
+    inst.reactivePowerA        = makeFloat32FromRegs(&buffer[3062 - 3000]);
+    inst.reactivePowerB        = makeFloat32FromRegs(&buffer[3064 - 3000]);
+    inst.reactivePowerC        = makeFloat32FromRegs(&buffer[3066 - 3000]);
+    inst.totalReactivePower     = makeFloat32FromRegs(&buffer[3068 - 3000]);
+
+    inst.apparentPowerA        = makeFloat32FromRegs(&buffer[3070 - 3000]);
+    inst.apparentPowerB        = makeFloat32FromRegs(&buffer[3072 - 3000]);
+    inst.apparentPowerC        = makeFloat32FromRegs(&buffer[3074 - 3000]);
+    inst.totalApparentPower     = makeFloat32FromRegs(&buffer[3076 - 3000]);
+
+    inst.powerFactorA          = makeFloat32FromRegs(&buffer[3078 - 3000]);
+    inst.powerFactorB          = makeFloat32FromRegs(&buffer[3080 - 3000]);
+    inst.powerFactorC          = makeFloat32FromRegs(&buffer[3082 - 3000]);
+    inst.totalPowerFactor       = makeFloat32FromRegs(&buffer[3084 - 3000]);
+
+    inst.frequency              = makeFloat32FromRegs(&buffer[3110 - 3000]);
+  }
+  delay(40);
+
+  // 3. SECTION 3: THD Harmonics (21300 - 21335)
+  bool s3_ok = readHoldingRegistersSchneider(slaveId, 21300, 36, buffer);
+  if (s3_ok) {
+    thd.thdCurrentA  = makeFloat32FromRegs(&buffer[0]);
+    thd.thdCurrentB  = makeFloat32FromRegs(&buffer[2]);
+    thd.thdCurrentC  = makeFloat32FromRegs(&buffer[4]);
+    thd.thdVoltageAB = makeFloat32FromRegs(&buffer[22]);
+    thd.thdVoltageBC = makeFloat32FromRegs(&buffer[24]);
+    thd.thdVoltageCA = makeFloat32FromRegs(&buffer[26]);
+    thd.thdVoltageAN = makeFloat32FromRegs(&buffer[30]);
+    thd.thdVoltageBN = makeFloat32FromRegs(&buffer[32]);
+    thd.thdVoltageCN = makeFloat32FromRegs(&buffer[34]);
+  }
+
+  return (s1_ok && s2_ok && s3_ok);
+}
+
+
+void onPPPEvent(arduino_event_id_t event, arduino_event_info_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_PPP_START:
+      Serial.println("[PPP] Started");
+      break;
+    case ARDUINO_EVENT_PPP_CONNECTED:
+      Serial.println("[PPP] Connected to modem");
+      break;
+    case ARDUINO_EVENT_PPP_GOT_IP:
+      Serial.println("[PPP] GOT IP! ✅");
+      Serial.println(PPP.localIP());
+      ppp_got_ip = true;
+      break;
+    case ARDUINO_EVENT_PPP_LOST_IP:
+      Serial.println("[PPP] Lost IP");
+      ppp_got_ip = false;
+      break;
+    case ARDUINO_EVENT_PPP_DISCONNECTED:
+      Serial.println("[PPP] Disconnected");
+      ppp_got_ip = false;
+      break;
+    default:
+      break;
+  }
+}
+
+void hardwareResetModem() {
+  Serial.println("\n🔄 [PPP] Hard Resetting 4G Modem via GPIO 3...");
+  
+  PPP.end();
+  delay(1000);
+
+  pinMode(PPP_MODEM_RST_PIN, OUTPUT);
+  digitalWrite(PPP_MODEM_RST_PIN, LOW);   
+  delay(500);                             
+  digitalWrite(PPP_MODEM_RST_PIN, HIGH);  
+  pinMode(PPP_MODEM_RST_PIN, INPUT_PULLUP);
+  
+  Serial.println("⏳ [4G] Waiting 20 seconds for Modem Bootup & Cellular Registration...");
+  uint32_t t0 = millis();
+  while (millis() - t0 < 20000) {
+    esp_task_wdt_reset();
+    delay(500);
+  }
+
+  ppp_got_ip = false;
+}
+
+bool startPPP() {
+  Serial.println("[PPP] Configuring modem...");
+  PPP.setApn(PPP_MODEM_APN);
+  if (PPP_MODEM_PIN) PPP.setPin(PPP_MODEM_PIN);
+  PPP.setResetPin(PPP_MODEM_RST_PIN, PPP_MODEM_RST_LOW, PPP_MODEM_RST_DELAY);
+  PPP.setPins(PPP_MODEM_TX_PIN, PPP_MODEM_RX_PIN, -1, -1, ESP_MODEM_FLOW_CONTROL_NONE);
+
+  Serial.println("[PPP] Starting modem -- this can take 10-30s...");
+  if (!PPP.begin(PPP_MODEM_MODEL, /*uart_num=*/2, /*baud_rate=*/115200)) {
+    Serial.println("[PPP] begin() FAILED! Check wiring/power/model.");
+    return false;
+  }
+
+  Serial.print("[PPP] Manufacturer: "); Serial.println(PPP.moduleName());
+  Serial.print("[PPP] IMEI: "); Serial.println(PPP.IMEI());
+
+  Serial.println("[PPP] Waiting for network registration...");
+  uint32_t regStart = millis();
+  bool attached = false;
+  while (millis() - regStart < 60000) {
+    esp_task_wdt_reset();
+    attached = PPP.attached();
+    int rssi = PPP.RSSI();
+    if (rssi != -1 && rssi != 0) {
+      last_valid_rssi = rssi;
+    }
+    Serial.print("[PPP] attached="); Serial.print(attached);
+    Serial.print(" | RSSI="); Serial.print(rssi);
+    Serial.print(" | operator="); Serial.println(PPP.operatorName());
+    if (attached) break;
+    delay(2000);
+  }
+
+  if (!attached) {
+    Serial.println("[PPP] Network NEVER attached!");
+    return false;
+  }
+  Serial.println("[PPP] Network ATTACHED. Switching to data mode...");
+
+  if (!PPP.mode(ESP_MODEM_MODE_DATA)) {
+    Serial.println("[PPP] mode(DATA) switch FAILED!");
+    return false;
+  }
+
+  Serial.print("[PPP] Waiting for IP...");
+  uint32_t t0 = millis();
+  while (!ppp_got_ip && millis() - t0 < 60000) {
+    esp_task_wdt_reset();
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  return ppp_got_ip;
+}
+
+// 📌 Dashboard se Counter Set karne ka Command Receiver
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  char msg[256];
+  if (length >= sizeof(msg)) length = sizeof(msg) - 1;
+  memcpy(msg, payload, length);
+  msg[length] = '\0';
+
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, msg);
+  if (!err) {
+    if (doc.containsKey("set_tap_count") || doc["cmd"] == "set_tap_count") {
+      uint32_t val = doc.containsKey("set_tap_count") ? doc["set_tap_count"] : doc["val"];
+      oltcData.tapCounter = val;
+      nvsStorage.putUInt("tap_count", val);
+      Serial.printf("✅ [WEB DASHBOARD CMD] Tap Counter Calibrated To: %u\n", val);
+    }
+  }
+}
+
+void reconnectMQTT() {
+  secureClient.setInsecure(); 
+  mqttClient.setServer(mqtt_broker, mqtt_port);
+  mqttClient.setCallback(mqttCallback);  // 👈 Ye line add karein
+  mqttClient.setBufferSize(6144);
+
+  Serial.print("[MQTT] Connecting to "); Serial.print(mqtt_broker); Serial.println(" ...");
+  // if (mqttClient.connect(device_id, mqtt_user, mqtt_pass)) {
+  String client_id_unique = "OXMO_" + getESP32HardwareMAC();
+  if (mqttClient.connect(client_id_unique.c_str(), mqtt_user, mqtt_pass)) {
+    Serial.println("[MQTT] CONNECTED! ✅");
+    mqttClient.subscribe(mqtt_sub_topic); // 👈 Ye line add karein
+  } else {
+    Serial.print("[MQTT] FAILED, state="); Serial.println(mqttClient.state());
+  }
+}
+
+// --------------------------------------------------------------------------
+// 🖨️ HELPER: PRINT ALL 66 REGISTERS FOR A METER
+// --------------------------------------------------------------------------
+void printFullMeter66Registers(const char* meterTitle, uint8_t slaveId, bool isOnline, 
+                               EnergyData &sec1, InstantaneousData &sec2, THDData &sec3) {
+  logPrintln("\n=================================================================");
+  logPrint("   📊 "); logPrint(meterTitle); logPrint(" (SLAVE ID: "); logPrint(String(slaveId));
+  logPrintln(isOnline ? " | STATUS: ONLINE ✅)" : " | STATUS: OFFLINE ❌)");
+  logPrintln("=================================================================");
+
+  if (!isOnline) {
+    logPrintln("  ❌ Modbus Communication Failed! Check RS485 wiring & Slave ID.");
+    return;
+  }
+
+  // 🟢 SECTION 1: ALL 12 ENERGY PARAMETERS (2700 - 2723)
+  logPrintln("\n  🟢 [SECTION 1] ALL 12 ENERGY PARAMETERS (2700 - 2723):");
+  logPrint("     1. Import Active Energy (2700):        "); logPrint(String(sec1.import_kWh, 2)); logPrintln(" kWh");
+  logPrint("     2. Export Active Energy (2702):        "); logPrint(String(sec1.export_kWh, 2)); logPrintln(" kWh");
+  logPrint("     3. Total Active Energy (2704):         "); logPrint(String(sec1.totalActive_kWh, 2)); logPrintln(" kWh");
+  logPrint("     4. Net Active Energy (2706):           "); logPrint(String(sec1.netActive_kWh, 2)); logPrintln(" kWh");
+  logPrint("     5. Reactive Energy Deliv (2708):       "); logPrint(String(sec1.reactiveDeliv_kVARh, 2)); logPrintln(" kVARh");
+  logPrint("     6. Reactive Energy Recv (2710):        "); logPrint(String(sec1.reactiveRecv_kVARh, 2)); logPrintln(" kVARh");
+  logPrint("     7. Total Reactive Energy (2712):       "); logPrint(String(sec1.totalReactive_kVARh, 2)); logPrintln(" kVARh");
+  logPrint("     8. Net Reactive Energy (2714):         "); logPrint(String(sec1.netReactive_kVARh, 2)); logPrintln(" kVARh");
+  logPrint("     9. Apparent Energy Deliv (2716):       "); logPrint(String(sec1.apparentDeliv_kVAh, 2)); logPrintln(" kVAh");
+  logPrint("    10. Apparent Energy Recv (2718):        "); logPrint(String(sec1.apparentRecv_kVAh, 2)); logPrintln(" kVAh");
+  logPrint("    11. Total Apparent Energy (2720):       "); logPrint(String(sec1.totalApparent_kVAh, 2)); logPrintln(" kVAh");
+  logPrint("    12. Net Apparent Energy (2722):         "); logPrint(String(sec1.netApparent_kVAh, 2)); logPrintln(" kVAh");
+
+  // 🟢 SECTION 2: ALL 45 INSTANTANEOUS PARAMETERS (3000 - 3111)
+  logPrintln("\n  🟢 [SECTION 2] ALL 45 INSTANTANEOUS PARAMETERS (3000 - 3111):");
+  logPrintln("    --- CURRENTS ---");
+  logPrint("    13. Current A (3000):                   "); logPrint(String(sec2.currentA, 2)); logPrintln(" A");
+  logPrint("    14. Current B (3002):                   "); logPrint(String(sec2.currentB, 2)); logPrintln(" A");
+  logPrint("    15. Current C (3004):                   "); logPrint(String(sec2.currentC, 2)); logPrintln(" A");
+  logPrint("    16. Neutral Current (3006):             "); logPrint(String(sec2.neutralCurrent, 2)); logPrintln(" A");
+  logPrint("    17. Ground Current (3008):              "); logPrint(String(sec2.groundCurrent, 2)); logPrintln(" A");
+  logPrint("    18. Average Current (3010):             "); logPrint(String(sec2.avgCurrent, 2)); logPrintln(" A");
+  logPrint("    19. Current Unbalance A (3012):         "); logPrint(String(sec2.currentUnbalanceA, 1)); logPrintln(" %");
+  logPrint("    20. Current Unbalance B (3014):         "); logPrint(String(sec2.currentUnbalanceB, 1)); logPrintln(" %");
+  logPrint("    21. Current Unbalance C (3016):         "); logPrint(String(sec2.currentUnbalanceC, 1)); logPrintln(" %");
+  logPrint("    22. Worst Current Unbalance (3018):     "); logPrint(String(sec2.worstCurrentUnbalance, 1)); logPrintln(" %");
+
+  logPrintln("    --- LINE VOLTAGES ---");
+  logPrint("    23. Voltage AB (3020):                  "); logPrint(String(sec2.voltageAB, 1)); logPrintln(" V");
+  logPrint("    24. Voltage BC (3022):                  "); logPrint(String(sec2.voltageBC, 1)); logPrintln(" V");
+  logPrint("    25. Voltage CA (3024):                  "); logPrint(String(sec2.voltageCA, 1)); logPrintln(" V");
+  logPrint("    26. Average Line Voltage (3026):        "); logPrint(String(sec2.avgLineVoltage, 1)); logPrintln(" V");
+
+  logPrintln("    --- PHASE VOLTAGES ---");
+  logPrint("    27. Voltage AN (3028):                  "); logPrint(String(sec2.voltageAN, 1)); logPrintln(" V");
+  logPrint("    28. Voltage BN (3030):                  "); logPrint(String(sec2.voltageBN, 1)); logPrintln(" V");
+  logPrint("    29. Voltage CN (3032):                  "); logPrint(String(sec2.voltageCN, 1)); logPrintln(" V");
+  logPrint("    30. Voltage NG (3034):                  "); logPrint(String(sec2.voltageNG, 1)); logPrintln(" V");
+  logPrint("    31. Average Phase Voltage (3036):       "); logPrint(String(sec2.avgPhaseVoltage, 1)); logPrintln(" V");
+
+  logPrintln("    --- VOLTAGE UNBALANCES ---");
+  logPrint("    32. Voltage Unbalance AB (3038):        "); logPrint(String(sec2.voltageUnbalanceAB, 1)); logPrintln(" %");
+  logPrint("    33. Voltage Unbalance BC (3040):        "); logPrint(String(sec2.voltageUnbalanceBC, 1)); logPrintln(" %");
+  logPrint("    34. Voltage Unbalance CA (3042):        "); logPrint(String(sec2.voltageUnbalanceCA, 1)); logPrintln(" %");
+  logPrint("    35. Worst Voltage Unbalance LL (3044):  "); logPrint(String(sec2.worstVoltageUnbalanceLL, 1)); logPrintln(" %");
+  logPrint("    36. Voltage Unbalance AN (3046):        "); logPrint(String(sec2.voltageUnbalanceAN, 1)); logPrintln(" %");
+  logPrint("    37. Voltage Unbalance BN (3048):        "); logPrint(String(sec2.voltageUnbalanceBN, 1)); logPrintln(" %");
+  logPrint("    38. Voltage Unbalance CN (3050):        "); logPrint(String(sec2.voltageUnbalanceCN, 1)); logPrintln(" %");
+  logPrint("    39. Worst Voltage Unbalance LN (3052):  "); logPrint(String(sec2.worstVoltageUnbalanceLN, 1)); logPrintln(" %");
+
+  logPrintln("    --- POWERS ---");
+  logPrint("    40. Active Power A (3054):              "); logPrint(String(sec2.activePowerA, 2)); logPrintln(" kW");
+  logPrint("    41. Active Power B (3056):              "); logPrint(String(sec2.activePowerB, 2)); logPrintln(" kW");
+  logPrint("    42. Active Power C (3058):              "); logPrint(String(sec2.activePowerC, 2)); logPrintln(" kW");
+  logPrint("    43. Total Active Power (3060):          "); logPrint(String(sec2.totalActivePower, 2)); logPrintln(" kW");
+
+  logPrint("    44. Reactive Power A (3062):            "); logPrint(String(sec2.reactivePowerA, 2)); logPrintln(" kVAR");
+  logPrint("    45. Reactive Power B (3064):            "); logPrint(String(sec2.reactivePowerB, 2)); logPrintln(" kVAR");
+  logPrint("    46. Reactive Power C (3066):            "); logPrint(String(sec2.reactivePowerC, 2)); logPrintln(" kVAR");
+  logPrint("    47. Total Reactive Power (3068):        "); logPrint(String(sec2.totalReactivePower, 2)); logPrintln(" kVAR");
+
+  logPrint("    48. Apparent Power A (3070):            "); logPrint(String(sec2.apparentPowerA, 2)); logPrintln(" kVA");
+  logPrint("    49. Apparent Power B (3072):            "); logPrint(String(sec2.apparentPowerB, 2)); logPrintln(" kVA");
+  logPrint("    50. Apparent Power C (3074):            "); logPrint(String(sec2.apparentPowerC, 2)); logPrintln(" kVA");
+  logPrint("    51. Total Apparent Power (3076):        "); logPrint(String(sec2.totalApparentPower, 2)); logPrintln(" kVA");
+
+  logPrintln("    --- POWER FACTOR & FREQUENCY ---");
+  logPrint("    52. Power Factor A (3078):              "); logPrintln(String(sec2.powerFactorA, 2));
+  logPrint("    53. Power Factor B (3080):              "); logPrintln(String(sec2.powerFactorB, 2));
+  logPrint("    54. Power Factor C (3082):              "); logPrintln(String(sec2.powerFactorC, 2));
+  logPrint("    55. Total Power Factor (3084):          "); logPrintln(String(sec2.totalPowerFactor, 2));
+  logPrint("    56. Frequency (3110):                   "); logPrint(String(sec2.frequency, 2)); logPrintln(" Hz");
+
+  // 🟢 SECTION 3: ALL 9 THD HARMONICS PARAMETERS (21300 - 21335)
+  logPrintln("\n  🟢 [SECTION 3] ALL 9 THD HARMONICS PARAMETERS (21300 - 21335):");
+  logPrint("    57. THD Current A (21300):              "); logPrint(String(sec3.thdCurrentA, 2)); logPrintln(" %");
+  logPrint("    58. THD Current B (21302):              "); logPrint(String(sec3.thdCurrentB, 2)); logPrintln(" %");
+  logPrint("    59. THD Current C (21304):              "); logPrint(String(sec3.thdCurrentC, 2)); logPrintln(" %");
+  logPrint("    60. THD Voltage AB (21322):             "); logPrint(String(sec3.thdVoltageAB, 2)); logPrintln(" %");
+  logPrint("    61. THD Voltage BC (21324):             "); logPrint(String(sec3.thdVoltageBC, 2)); logPrintln(" %");
+  logPrint("    62. THD Voltage CA (21326):             "); logPrint(String(sec3.thdVoltageCA, 2)); logPrintln(" %");
+  logPrint("    63. THD Voltage AN (21330):             "); logPrint(String(sec3.thdVoltageAN, 2)); logPrintln(" %");
+  logPrint("    64. THD Voltage BN (21332):             "); logPrint(String(sec3.thdVoltageBN, 2)); logPrintln(" %");
+  logPrint("    65. THD Voltage CN (21334):             "); logPrint(String(sec3.thdVoltageCN, 2)); logPrintln(" %");
+}
+
+void printAllDataToSerial() {
+  int cur_val  = last_valid_rssi;
+  int gsm_csq  = (cur_val < 0) ? ((cur_val + 113) / 2) : cur_val;
+  int gsm_rssi = (cur_val < 0) ? cur_val : (-113 + (2 * gsm_csq));
+
+  if (sd_card_mounted) {
+    currentLogFile = SD.open(logFileName, FILE_APPEND);
+  }
+
+  logPrintln("\n" + getFormattedTime() + " =================================================================");
+  logPrintln("          🚀 COMPLETE SUBSTATION TELEMETRY SCAN");
+  logPrintln("=================================================================");
+  logPrint("📶 4G CSQ: "); logPrint(String(gsm_csq));
+  logPrint(" (RSSI: "); logPrint(String(gsm_rssi)); logPrint(" dBm)");
+  logPrint(" | PPP: "); logPrint(ppp_got_ip ? "CONNECTED" : "DOWN");
+  logPrint(" | MQTT: "); logPrintln(mqttClient.connected() ? "ONLINE" : "OFFLINE");
+
+  // 📌 1. PRINT ALL 66 REGISTERS OF METER 1
+  printFullMeter66Registers("SCHNEIDER METER 1 (INCOMER)", SCHNEIDER_1_ID, m1_online, m1_sec1, m1_sec2, m1_sec3);
+
+  // 📌 2. PRINT ALL 66 REGISTERS OF METER 2
+  printFullMeter66Registers("SCHNEIDER METER 2 (OUTGOING)", SCHNEIDER_2_ID, m2_online, m2_sec1, m2_sec2, m2_sec3);
+
+  // 📌 3. TPR-702 TEMPERATURES
+  logPrintln("\n=================================================================");
+  logPrint("   🌡️ TPR-702 TRANSFORMER TEMPERATURE (SLAVE ID: "); logPrint(String(TPR702_ID));
+  logPrintln(tprData.is_valid ? " | STATUS: ONLINE ✅)" : " | STATUS: OFFLINE ❌)");
+  logPrintln("=================================================================");
+  if (tprData.is_valid) {
+    logPrint("    Oil Temperature:  "); logPrint(String(tprData.oilTemp)); logPrintln(" °C");
+    logPrint("    HV Winding Temp:  "); logPrint(String(tprData.hvTemp)); logPrintln(" °C");
+    logPrint("    LV Winding Temp:  "); logPrint(String(tprData.lvTemp)); logPrintln(" °C");
+  }
+
+   // 📌 4. OLTC & 4-20mA SENSORS
+  logPrintln("\n=================================================================");
+  logPrintln("   🎛️ OLTC MONITORING & ANALOG SENSORS");
+  logPrintln("=================================================================");
+  logPrint("    Analog 4-20mA (GPIO 1):  "); logPrint(String(analog_4_20mA_val, 2)); logPrintln(" mA");
+  logPrint("    Live Tap (GPIO 10):      Tap "); logPrint(String(oltcData.currentTap)); logPrintln(" / 17");
+  logPrint("    Tap Counter:             "); logPrint(String(oltcData.tapCounter)); logPrintln(" Operations");
+
+  // 📌 5. DIGITAL INPUTS (DI 1 to DI 6)
+  logPrintln("\n=================================================================");
+  logPrintln("   🚪 DIGITAL INPUT STATUS (DI 1 to DI 6)");
+  logPrintln("=================================================================");
+  logPrint("    DI 1 (41): "); logPrint(digitalRead(DI_PIN_1) ? "HIGH" : "LOW");
+  logPrint(" | DI 2 (42): "); logPrint(digitalRead(DI_PIN_2) ? "HIGH" : "LOW");
+  logPrint(" | DI 3 (38): "); logPrint(digitalRead(DI_PIN_3) ? "HIGH" : "LOW");
+  logPrint(" | DI 4 (39): "); logPrint(digitalRead(DI_PIN_4) ? "HIGH" : "LOW");
+  logPrint(" | DI 5 (40): "); logPrint(digitalRead(DI_PIN_5) ? "HIGH" : "LOW");
+  logPrint(" | DI 6 (14):  "); logPrintln(digitalRead(DI_PIN_6) ? "HIGH" : "LOW");
+  logPrintln("=================================================================\n");
+
+  if (sd_card_mounted && currentLogFile) {
+    currentLogFile.close();
+  }
+}
+
+// --------------------------------------------------------------------------
+// 📦 HELPER: PACK ALL 66 REGISTERS INTO JSON FOR A SCHNEIDER METER
+// --------------------------------------------------------------------------
+void addMeterToJSON(JsonObject &meterObj, bool isOnline, EnergyData &sec1, InstantaneousData &sec2, THDData &sec3) {
+  meterObj["online"] = isOnline;
+
+  // 🟢 SECTION 1: ALL 12 ENERGY REGISTERS (2700 - 2723)
+  JsonObject energyObj = meterObj.createNestedObject("energy");
+  energyObj["imp_kwh"]       = sec1.import_kWh;
+  energyObj["exp_kwh"]       = sec1.export_kWh;
+  energyObj["tot_kwh"]       = sec1.totalActive_kWh;
+  energyObj["net_kwh"]       = sec1.netActive_kWh;
+  energyObj["rec_del_kvarh"] = sec1.reactiveDeliv_kVARh;
+  energyObj["rec_rec_kvarh"] = sec1.reactiveRecv_kVARh;
+  energyObj["tot_kvarh"]     = sec1.totalReactive_kVARh;
+  energyObj["net_kvarh"]     = sec1.netReactive_kVARh;
+  energyObj["app_del_kvah"]  = sec1.apparentDeliv_kVAh;
+  energyObj["app_rec_kvah"]  = sec1.apparentRecv_kVAh;
+  energyObj["tot_kvah"]      = sec1.totalApparent_kVAh;
+  energyObj["net_kvah"]      = sec1.netApparent_kVAh;
+
+  // 🟢 SECTION 2: ALL 45 INSTANTANEOUS REGISTERS (3000 - 3111)
+  JsonObject elecObj = meterObj.createNestedObject("electrical");
+  elecObj["iA"]        = sec2.currentA;
+  elecObj["iB"]        = sec2.currentB;
+  elecObj["iC"]        = sec2.currentC;
+  elecObj["iN"]        = sec2.neutralCurrent;
+  elecObj["iG"]        = sec2.groundCurrent;
+  elecObj["iAvg"]      = sec2.avgCurrent;
+  elecObj["iUnbA"]     = sec2.currentUnbalanceA;
+  elecObj["iUnbB"]     = sec2.currentUnbalanceB;
+  elecObj["iUnbC"]     = sec2.currentUnbalanceC;
+  elecObj["iUnbMax"]   = sec2.worstCurrentUnbalance;
+
+  elecObj["vAB"]       = sec2.voltageAB;
+  elecObj["vBC"]       = sec2.voltageBC;
+  elecObj["vCA"]       = sec2.voltageCA;
+  elecObj["vLineAvg"]  = sec2.avgLineVoltage;
+
+  elecObj["vAN"]       = sec2.voltageAN;
+  elecObj["vBN"]       = sec2.voltageBN;
+  elecObj["vCN"]       = sec2.voltageCN;
+  elecObj["vNG"]       = sec2.voltageNG;
+  elecObj["vPhsAvg"]   = sec2.avgPhaseVoltage;
+
+  elecObj["vUnbAB"]    = sec2.voltageUnbalanceAB;
+  elecObj["vUnbBC"]    = sec2.voltageUnbalanceBC;
+  elecObj["vUnbCA"]    = sec2.voltageUnbalanceCA;
+  elecObj["vUnbLLMax"] = sec2.worstVoltageUnbalanceLL;
+  elecObj["vUnbAN"]    = sec2.voltageUnbalanceAN;
+  elecObj["vUnbBN"]    = sec2.voltageUnbalanceBN;
+  elecObj["vUnbCN"]    = sec2.voltageUnbalanceCN;
+  elecObj["vUnbLNMax"] = sec2.worstVoltageUnbalanceLN;
+
+  elecObj["kwA"]       = sec2.activePowerA;
+  elecObj["kwB"]       = sec2.activePowerB;
+  elecObj["kwC"]       = sec2.activePowerC;
+  elecObj["kwTot"]     = sec2.totalActivePower;
+
+  elecObj["kvarA"]     = sec2.reactivePowerA;
+  elecObj["kvarB"]     = sec2.reactivePowerB;
+  elecObj["kvarC"]     = sec2.reactivePowerC;
+  elecObj["kvarTot"]   = sec2.totalReactivePower;
+
+  elecObj["kvaA"]      = sec2.apparentPowerA;
+  elecObj["kvaB"]      = sec2.apparentPowerB;
+  elecObj["kvaC"]      = sec2.apparentPowerC;
+  elecObj["kvaTot"]    = sec2.totalApparentPower;
+
+  elecObj["pfA"]       = sec2.powerFactorA;
+  elecObj["pfB"]       = sec2.powerFactorB;
+  elecObj["pfC"]       = sec2.powerFactorC;
+  elecObj["pfTot"]     = sec2.totalPowerFactor;
+
+  elecObj["freq"]      = sec2.frequency;
+
+  // 🟢 SECTION 3: ALL 9 THD HARMONICS REGISTERS (21300 - 21335)
+  JsonObject thdObj = meterObj.createNestedObject("thd");
+  thdObj["thd_iA"]     = sec3.thdCurrentA;
+  thdObj["thd_iB"]     = sec3.thdCurrentB;
+  thdObj["thd_iC"]     = sec3.thdCurrentC;
+  thdObj["thd_vAB"]    = sec3.thdVoltageAB;
+  thdObj["thd_vBC"]    = sec3.thdVoltageBC;
+  thdObj["thd_vCA"]    = sec3.thdVoltageCA;
+  thdObj["thd_vAN"]    = sec3.thdVoltageAN;
+  thdObj["thd_vBN"]    = sec3.thdVoltageBN;
+  thdObj["thd_vCN"]    = sec3.thdVoltageCN;
+}
+
+void publishMQTTTelemetry() {
+  DynamicJsonDocument doc(6144); 
+
+  int cur_val  = last_valid_rssi;
+  int gsm_csq  = (cur_val < 0) ? ((cur_val + 113) / 2) : cur_val;
+  int gsm_rssi = (cur_val < 0) ? cur_val : (-113 + (2 * gsm_csq));
+
+  // 1. SYSTEM TELEMETRY
+  JsonObject sysObj = doc.createNestedObject("sys");
+  sysObj["ppp_ip"]         = ppp_got_ip;
+  sysObj["mqtt_connected"] = mqttClient.connected();
+  sysObj["data_available"] = true;               
+  sysObj["rssi"]           = gsm_rssi;           
+  sysObj["csq"]            = gsm_csq;            
+  sysObj["free_heap"]      = ESP.getFreeHeap();
+
+  // 2. DIGITAL INPUTS (DI 1 to DI 6)
+  JsonObject digitalObj = doc.createNestedObject("digital_input");
+  digitalObj["di1"] = digitalRead(DI_PIN_1);
+  digitalObj["di2"] = digitalRead(DI_PIN_2);
+  digitalObj["di3"] = digitalRead(DI_PIN_3);
+  digitalObj["di4"] = digitalRead(DI_PIN_4);
+  digitalObj["di5"] = digitalRead(DI_PIN_5);
+  digitalObj["di6"] = digitalRead(DI_PIN_6);
+
+  // 3. ANALOG & OLTC
+  JsonObject analogObj = doc.createNestedObject("analog");
+  analogObj["raw_adc"] = analog_raw_adc;
+  analogObj["mA_val"]  = analog_4_20mA_val;
+
+  JsonObject oltcObj = doc.createNestedObject("oltc");
+  oltcObj["current_tap"] = oltcData.currentTap;
+  oltcObj["tap_voltage"] = oltc_live_voltage; // 👈 Ye 1 line add karein (Live Volts)
+  oltcObj["tap_counter"] = oltcData.tapCounter;
+  oltcObj["sensor_ok"]   = oltcData.sensor_ok;
+
+  // 4. TPR-702 TEMPERATURES
+  JsonObject tprObj = doc.createNestedObject("tpr702");
+  tprObj["oil_temp"] = tprData.oilTemp;
+  tprObj["hv_temp"]  = tprData.hvTemp;
+  tprObj["lv_temp"]  = tprData.lvTemp;
+  tprObj["valid"]    = tprData.is_valid;
+
+  // 5. 📌 SCHNEIDER METER 1 (ALL 66 REGISTERS)
+  JsonObject m1Obj = doc.createNestedObject("meter1");
+  addMeterToJSON(m1Obj, m1_online, m1_sec1, m1_sec2, m1_sec3);
+
+  // 6. 📌 SCHNEIDER METER 2 (ALL 66 REGISTERS)
+  JsonObject m2Obj = doc.createNestedObject("meter2");
+  addMeterToJSON(m2Obj, m2_online, m2_sec1, m2_sec2, m2_sec3);
+
+  // 👇 YAHAN BAS 'static' LAGA DIJIYE (Stack Overflow 100% Solve):
+  static char jsonBuffer[6144]; 
+  size_t n = serializeJson(doc, jsonBuffer);
+
+  Serial.print("[MQTT] Publishing Complete Telemetry ("); 
+  Serial.print(n); Serial.print(" bytes) to "); Serial.println(mqtt_topic);
+
+  if (mqttClient.publish(mqtt_topic, jsonBuffer)) {
+    Serial.println("✅ Publish OK (Both Meters 132 Regs Included!)");
+  } else {
+    Serial.println("❌ Publish FAILED -- Check buffer size!");
+  }
+
+  // 💾 SAVE EXACT FULL JSON TO SD CARD
+  if (sd_card_mounted) {
+    File logFile = SD.open(logFileName, FILE_APPEND);
+    if (logFile) {
+      logFile.print(getFormattedTime() + " [FULL MQTT JSON]: ");
+      logFile.println(jsonBuffer);
+      logFile.close();
+    }
+  }
+}
+
+
+
+// --------------------------------------------------------------------------
+// 📱 LOCAL WIFI AP & WEB CONFIG PORTAL (192.168.4.1)
+// --------------------------------------------------------------------------
+WebServer localServer(80);
+
+void handleRoot() {
+  String html = "<!DOCTYPE html><html lang='en'><head>";
+  html += "<meta charset='UTF-8'>"; // 👈 Isse saare symbols aur emojis 100% clean dikhenge
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  html += "<title>OXMO OLTC Portal</title>";
+  html += "<style>";
+  html += "*{box-sizing:border-box;margin:0;padding:0;}";
+  html += "body{font-family:'Segoe UI',Roboto,sans-serif;background:#0b1329;color:#fff;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:15px;}";
+  html += ".card{background:#16223f;border:1px solid #233560;padding:25px;border-radius:16px;width:100%;max-width:400px;box-shadow:0 10px 30px rgba(0,0,0,0.5);text-align:center;}";
+  html += "h2{color:#00f2fe;font-size:22px;margin-bottom:20px;letter-spacing:0.5px;}";
+  html += ".stat-box{background:#0d182e;border:1px solid #1f3256;padding:12px 16px;border-radius:10px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:15px;}";
+  html += ".stat-label{color:#94a3b8;font-weight:500;}";
+  html += ".stat-val{color:#38bdf8;font-weight:bold;font-size:16px;}";
+  html += ".tap-badge{background:#0284c7;color:#fff;padding:4px 10px;border-radius:20px;font-size:14px;font-weight:bold;}";
+  html += "hr{border:none;border-top:1px solid #233560;margin:20px 0;}";
+  html += "h3{color:#f8fafc;font-size:16px;margin-bottom:12px;}";
+  html += "input{width:100%;padding:12px;font-size:16px;background:#0a1224;border:1px solid #00f2fe;color:#fff;border-radius:8px;text-align:center;margin-bottom:15px;outline:none;}";
+  html += "input:focus{border-color:#38bdf8;box-shadow:0 0 10px rgba(0,242,254,0.3);}";
+  html += "button{width:100%;padding:13px;font-size:16px;font-weight:bold;background:linear-gradient(135deg, #00f2fe, #4facfe);color:#000;border:none;border-radius:8px;cursor:pointer;transition:0.2s;}";
+  html += "button:hover{opacity:0.9;transform:scale(0.99);}";
+  html += "</style>";
+  html += "<script>setTimeout(()=>{location.reload();}, 3000);</script>"; // 👈 Har 3 second me live value auto refresh hogi
+  html += "</head><body>";
+  html += "<div class='card'>";
+  html += "<h2>⚡ OXMO OLTC Config Portal</h2>";
+  
+  html += "<div class='stat-box'><span class='stat-label'>📡 4-20mA Signal:</span><span class='stat-val'>" + String(analog_4_20mA_val, 2) + " mA</span></div>";
+  html += "<div class='stat-box'><span class='stat-label'>🎛️ Live Tap Position:</span><span class='tap-badge'>Tap " + String(oltcData.currentTap) + " / 17</span></div>";
+  html += "<div class='stat-box'><span class='stat-label'>🔢 Total Tap Counter:</span><span class='stat-val'>" + String(oltcData.tapCounter) + " Ops</span></div>";
+  
+  html += "<hr>";
+  html += "<h3>⚙️ Calibrate Initial Counter</h3>";
+  html += "<form action='/set_counter' method='POST'>";
+  html += "<input type='number' name='count_val' placeholder='Enter Initial Count' required>";
+  html += "<button type='submit'>Save to Flash 💾</button>";
+  html += "</form>";
+  html += "</div></body></html>";
+
+  localServer.send(200, "text/html; charset=utf-8", html); // 👈 charset=utf-8 ensures 100% clean text
+}
+
+void handleSetCounter() {
+  if (localServer.hasArg("count_val")) {
+    uint32_t newCount = localServer.arg("count_val").toInt();
+    oltcData.tapCounter = newCount;
+    nvsStorage.putUInt("tap_count", newCount); // Save to Flash NVS
+    Serial.printf("\n📱 [LOCAL WEB PORTAL] Tap Counter Successfully Calibrated To: %u\n", newCount);
+
+    String html = "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+    html += "<style>body{font-family:sans-serif;background:#0b1329;color:#fff;display:flex;justify-content:center;align-items:center;min-height:100vh;text-align:center;padding:20px;}";
+    html += ".box{background:#16223f;border:1px solid #22c55e;padding:30px;border-radius:16px;max-width:380px;box-shadow:0 10px 30px rgba(0,0,0,0.5);}";
+    html += "h2{color:#22c55e;margin-bottom:15px;}";
+    html += "p{color:#94a3b8;margin-bottom:20px;font-size:16px;}";
+    html += "a{display:inline-block;padding:10px 20px;background:#00f2fe;color:#000;text-decoration:none;border-radius:8px;font-weight:bold;}";
+    html += "</style></head><body>";
+    html += "<div class='box'><h2>✅ Successfully Saved!</h2>";
+    html += "<p>New Tap Counter is calibrated to: <b style='color:#fff;'>" + String(newCount) + "</b></p>";
+    html += "<a href='/'>⬅️ Back to Portal</a></div></body></html>";
+
+    localServer.send(200, "text/html; charset=utf-8", html);
+  }
+}
+
+void setupLocalWebPortal() {
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("OXMO_GATEWAY_CONFIG", "12345678");
+  Serial.println("📱 [WIFI AP] Hotspot Started: OXMO_GATEWAY_CONFIG (Password: 12345678)");
+  Serial.println("🌐 [WEB PORTAL] Open: http://192.168.4.1");
+
+  localServer.on("/", handleRoot);
+  localServer.on("/set_counter", HTTP_POST, handleSetCounter);
+  localServer.begin();
+}
+
+
+// --------------------------------------------------------------------------
+// SETUP / LOOP
+// --------------------------------------------------------------------------
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+   // 📌 Local Wi-Fi Config Hotspot Shuru Karein
+  setupLocalWebPortal();   // 👈 Ye line add karein
+
+  // 📌 1. CONFIGURE DIGITAL INPUT PINS (GPIO 41 & GPIO 42)
+  pinMode(DI_PIN_1, INPUT_PULLUP);
+  pinMode(DI_PIN_2, INPUT_PULLUP);
+  pinMode(DI_PIN_3, INPUT_PULLUP);  // 👈 Naya
+  pinMode(DI_PIN_4, INPUT_PULLUP);  // 👈 Naya
+  pinMode(DI_PIN_5, INPUT_PULLUP);  // 👈 Naya
+  pinMode(DI_PIN_6, INPUT_PULLUP);  // 👈 Naya
+
+  // 👇 BAS YEH 1 LINE ADD KAR DIJIYE:
+  pinMode(OLTC_TAP_PIN, INPUT_PULLDOWN); // 👈 Hawa me Pin 10 ko 0V par lock rakhega!
+
+    // 👇 YAHAN PASTE KAREIN (Flash Memory se Tap Counter Load):
+  nvsStorage.begin("oltc_nvs", false);
+  oltcData.tapCounter = nvsStorage.getUInt("tap_count", 0);
+  oltcData.currentTap = 1;
+  oltcData.sensor_ok  = false;
+  Serial.printf("\n💾 [FLASH NVS] Loaded Tap Counter: %u\n", oltcData.tapCounter);
+
+  // 📌 RECONFIGURE WDT TO 60 SECONDS SAFELY
+#if defined(ESP_IDF_VERSION_MAJOR) && (ESP_IDF_VERSION_MAJOR >= 5)
+  esp_task_wdt_config_t twdt_config = {
+      .timeout_ms = WDT_TIMEOUT * 1000,
+      .idle_core_mask = (1 << configNUM_CORES) - 1,
+      .trigger_panic = true
+  };
+  esp_task_wdt_reconfigure(&twdt_config);
+  esp_task_wdt_add(NULL);
+#else
+  esp_task_wdt_add(NULL);
+#endif
+  Serial.println("🐕 [WDT] Hardware Watchdog Reconfigured to 60s Safely!");
+
+  analogReadResolution(12);
+
+  // 📌 DYNAMIC MQTT TOPIC: transformer/<MACADDRESS>/rx
+  String mac = getESP32HardwareMAC();
+  mac.replace(":", "");
+  snprintf(mqtt_topic, sizeof(mqtt_topic), "transformer/%s/rx", mac.c_str());
+  // 👇 BAS YE 1 LINE ADD KAR LO (Command Rx Topic):
+  snprintf(mqtt_sub_topic, sizeof(mqtt_sub_topic), "transformer/%s/tx", mac.c_str());
+
+  Serial.println("\n========================================================");
+  Serial.print("   TARGET MQTT TOPIC: "); Serial.println(mqtt_topic);
+  Serial.println("   ESP32 GATEWAY -- SCHNEIDER + TPR-702 + PPP + RTC SD ");
+  Serial.println("========================================================");
+
+  // 🕒 Start I2C & SPI for RTC + SD Card
+  Wire.begin(I2C_SDA, I2C_SCL, 100000);
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+
+  Serial.println("[SD] Mounting SD Card...");
+  if (SD.begin(SD_CS)) {
+    sd_card_mounted = true;
+    Serial.println("[SD] SD Card Mounted Successfully! ✅");
+    logDataToSD("=== OFFLINE GATEWAY TELEMETRY LOG SESSION STARTED ===");
+  } else {
+    Serial.println("[SD] SD Card Mount Failed! ❌");
+  }
+
+  RS485Serial.begin(MODBUS_BAUD, SERIAL_8E1, RS485_RX_PIN, RS485_TX_PIN);
+
+  Network.onEvent(onPPPEvent);
+
+  if (!startPPP()) {
+    Serial.println("[PPP] Initial connect FAILED -- will retry in loop().");
+  } else {
+    reconnectMQTT();
+  }
+}
+
+static int network_fail_count = 0;
+
+void loop() {
+  esp_task_wdt_reset(); // Feed Watchdog
+  localServer.handleClient(); // 👈 Ye line add karein (Web Page Requests)
+
+  // 🕒 SERIAL COMMAND TO SET RTC TIME (e.g. set=2026,08,11,15,40,00)
+  if (Serial.available() > 0) {
+      String inputStr = Serial.readStringUntil('\n');
+      inputStr.trim();
+      if (inputStr.startsWith("set=")) {
+          inputStr = inputStr.substring(4);
+          int values[6];
+          int parsed = sscanf(inputStr.c_str(), "%d,%d,%d,%d,%d,%d", 
+                              &values[0], &values[1], &values[2], &values[3], &values[4], &values[5]);
+          if (parsed == 6) {
+              setDS3231Time(values[0], values[1], values[2], values[3], values[4], values[5]);
+          } else {
+              Serial.println("❌ [RTC ERROR] Invalid format! Use: set=YYYY,MM,DD,hh,mm,ss");
+          }
+      }
+      // 👇 YAHAN PASTE KAREIN (Tap Counter Command):
+      else if (inputStr.startsWith("set_tap=")) {
+          uint32_t val = inputStr.substring(8).toInt();
+          oltcData.tapCounter = val;
+          nvsStorage.putUInt("tap_count", val);
+          Serial.printf("✅ [SERIAL] Tap Counter Successfully Calibrated To: %u\n", val);
+      }
+  }
+
+  mqttClient.loop();
+
+  if (!ppp_got_ip && !PPP.attached()) {
+    network_fail_count++;
+    Serial.print("⚠️ [PPP] Link Down! Retry Attempt: "); 
+    Serial.println(network_fail_count);
+
+    if (network_fail_count >= 3) {
+      hardwareResetModem();
+      network_fail_count = 0; 
+    }
+
+    startPPP();
+  } else if (ppp_got_ip) {
+    network_fail_count = 0;
+  }
+
+  if (ppp_got_ip && !mqttClient.connected()) {
+    reconnectMQTT();
+  }
+
+    // 📌 1. READ SCHNEIDER METER 1 (Slave ID: 1)
+  m1_online = readSchneiderMeter(SCHNEIDER_1_ID, m1_sec1, m1_sec2, m1_sec3);
+  delay(50); // RS485 Bus Gap
+
+  // 📌 2. READ SCHNEIDER METER 2 (Slave ID: 3)
+  m2_online = readSchneiderMeter(SCHNEIDER_2_ID, m2_sec1, m2_sec2, m2_sec3);
+  delay(50); // RS485 Bus Gap
+
+  // 📌 3. READ TPR-702 TEMPERATURE CONTROLLER (Slave ID: 2)
+  tprData.is_valid = readTPR702(TPR702_ID, tprData.oilTemp, tprData.hvTemp, tprData.lvTemp);
+  delay(50);
+
+  // 📌 4. READ 4-20mA OLTC SENSOR
+  read4to20mASensor();
+
+  // 📌 5. READ DEDICATED OLTC TAP POSITION & COUNTER (GPIO 10)
+  readOLTCSensor();
+
+  // 📌 6. PRINT FULL SCAN TO SERIAL & LOG TO SD CARD
+  printAllDataToSerial();
+
+    // 💾 SAVE TELEMETRY LOG SUMMARY TO SD CARD WITH RTC TIMESTAMP
+  if (sd_card_mounted) {
+    String logLine = "M1_kWh:" + String(m1_sec1.totalActive_kWh, 2) + 
+                     ", M1_V:" + String(m1_sec2.avgLineVoltage, 1) + 
+                     ", M1_A:" + String(m1_sec2.avgCurrent, 2) + 
+                     ", M1_kW:" + String(m1_sec2.totalActivePower, 2) +
+                     " | M2_kWh:" + String(m2_sec1.totalActive_kWh, 2) + 
+                     ", M2_V:" + String(m2_sec2.avgLineVoltage, 1) + 
+                     ", M2_A:" + String(m2_sec2.avgCurrent, 2) + 
+                     ", M2_kW:" + String(m2_sec2.totalActivePower, 2) +
+                     " | OilT:" + String(tprData.oilTemp) + "C" +
+                     ", HVT:" + String(tprData.hvTemp) + "C" +
+                     ", LVT:" + String(tprData.lvTemp) + "C" +
+                     " | Tap:" + String(oltcData.currentTap) + 
+                     ", TapOps:" + String(oltcData.tapCounter) +
+                     ", mA:" + String(analog_4_20mA_val, 2) +
+                     " | DI:[" + String(digitalRead(DI_PIN_1)) + String(digitalRead(DI_PIN_2)) + 
+                                 String(digitalRead(DI_PIN_3)) + String(digitalRead(DI_PIN_4)) + 
+                                 String(digitalRead(DI_PIN_5)) + String(digitalRead(DI_PIN_6)) + "]";
+    logDataToSD(logLine);
+  }
+
+  if (mqttClient.connected()) {
+    publishMQTTTelemetry();
+  }
+
+  Serial.print("[SYS] Free heap: "); Serial.println(ESP.getFreeHeap());
+
+  // 📌 WDT-SAFE 5 SECOND DELAY LOOP
+  uint32_t delayStart = millis();
+  while (millis() - delayStart < 5000) {
+    esp_task_wdt_reset();
+    localServer.handleClient(); // 👈 Ye line add karein
+    delay(200);
+  }
+}
