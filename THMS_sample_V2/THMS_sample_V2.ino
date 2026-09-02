@@ -99,6 +99,8 @@ String mqtt_broker = "otplai.com";
 int    mqtt_port   = 8883;
 String mqtt_user   = "oxmo";
 String mqtt_pass   = "123456789";
+String wifi_ssid = "";
+String wifi_pass = "";
 const char* device_id   = "OXMO_GW_01";
 char        mqtt_topic[64];
 
@@ -1136,6 +1138,7 @@ void handleRoot() {
   html += "<div class='tab-btn active' onclick=\"openTab(event, 'tab1')\">🌐 Network</div>";
   html += "<div class='tab-btn' onclick=\"openTab(event, 'tab2')\">🚨 Alarms</div>";
   html += "<div class='tab-btn' onclick=\"openTab(event, 'tab3')\">🎛️ Tap Calib</div>";
+  html += "<div class='tab-btn' onclick=\"openTab(event, 'tab4')\">📶 Wi-Fi</div>"; // 👈 YEH NAYI LINE
   html += "</div>";
 
   // 🌐 TAB 1: Network Settings
@@ -1196,10 +1199,17 @@ void handleRoot() {
   html += "</form>";
   html += "</div>";
 
+  // 📶 TAB 4: Wi-Fi Setup
+  html += "<div id='tab4' class='tab-content'>";
+  html += "<form action='/set_wifi' method='POST'>";
+  html += "<div class='form-group'><label>Wi-Fi SSID</label><input type='text' name='w_ssid' value='" + wifi_ssid + "' placeholder='Enter Wi-Fi Name'></div>";
+  html += "<div class='form-group'><label>Wi-Fi Password</label><input type='text' name='w_pass' value='" + wifi_pass + "' placeholder='Enter Password'></div>";
+  html += "<button type='submit'>Save Wi-Fi Credentials 💾</button>";
+  html += "</form></div>";
+
   html += "</div></body></html>";
   localServer.send(200, "text/html; charset=utf-8", html);
 }
-
 
 void handleSetCounter() {
   if (localServer.hasArg("count_val")) {
@@ -1258,6 +1268,22 @@ void handleSetConfig() {
   localServer.send(303);
 }
 
+// 📶 Wi-Fi Save Karne Ka Handler
+void handleSetWifi() {
+  if (localServer.hasArg("w_ssid")) {
+    wifi_ssid = localServer.arg("w_ssid"); 
+    nvsStorage.putString("wifi_ssid", wifi_ssid);
+    
+    wifi_pass = localServer.arg("w_pass"); 
+    nvsStorage.putString("wifi_pass", wifi_pass);
+    
+    Serial.println("\n✅ [PORTAL] Wi-Fi Credentials Saved to Flash NVS!");
+  }
+  localServer.sendHeader("Location", "/");
+  localServer.send(303);
+}
+
+
 // 👇 YEH NAYA FUNCTION ADD KAREIN (Background me live stats bhejne ke liye)
 void handleLiveStats() {
   String json = "{";
@@ -1281,6 +1307,7 @@ void setupLocalWebPortal() {
   localServer.on("/reset_voltages", HTTP_POST, handleResetVoltages); // 👈 Reset Handler
   localServer.on("/set_config", HTTP_POST, handleSetConfig); // 👈 Yeh line add karni hai
   localServer.on("/api/data", HTTP_GET, handleLiveStats); // 👈 BAS YEH 1 LINE NAYI ADD KAREIN
+  localServer.on("/set_wifi", HTTP_POST, handleSetWifi); // 👈 YEH LINE ADD KAREIN
   localServer.begin();
 }
 
@@ -1323,6 +1350,9 @@ void setup() {
   mqtt_port   = nvsStorage.getUInt("mq_port", 8883);
   mqtt_user   = nvsStorage.getString("mq_user", "oxmo");
   mqtt_pass   = nvsStorage.getString("mq_pass", "123456789");
+  wifi_ssid = nvsStorage.getString("wifi_ssid", "");
+  wifi_pass = nvsStorage.getString("wifi_pass", "");
+
   
   upload_interval_sec = nvsStorage.getUInt("up_int", 60);
   alarm_oil_temp      = nvsStorage.getUInt("alrm_oil", 80);
@@ -1498,37 +1528,41 @@ void loop() {
       current_alarm_cause = String(upload_interval_sec) + "_SEC_HEARTBEAT";
     }
   }
+    // ==========================================================
+  // 📤 PUBLISH TO MQTT & SD CARD (Jab Alarm aayega ya 1-Min poora hoga)
   // ==========================================================
-  // 📤 PUBLISH TO MQTT (Jab Alarm aayega ya 1-Min poora hoga)
-  // ==========================================================
-  if (force_mqtt_publish && ppp_got_ip && mqttClient.connected()) {
+  if (force_mqtt_publish) {
+    
+    // 1. 📡 Publish to MQTT (Aur SD Card me FULL JSON Save karein)
+    // Yeh function automatically Internet na hone par bhi JSON ko SD me save kar dega!
     publishMQTTTelemetry(current_alarm_cause);
+
+    // 2. 💾 SAVE TELEMETRY LOG SUMMARY TO SD CARD WITH RTC TIMESTAMP
+    if (sd_card_mounted) {
+      String logLine = "M1_kWh:" + String(m1_sec1.totalActive_kWh, 2) + 
+                       ", M1_V:" + String(m1_sec2.avgLineVoltage, 1) + 
+                       ", M1_A:" + String(m1_sec2.avgCurrent, 2) + 
+                       ", M1_kW:" + String(m1_sec2.totalActivePower, 2) +
+                       " | M2_kWh:" + String(m2_sec1.totalActive_kWh, 2) + 
+                       ", M2_V:" + String(m2_sec2.avgLineVoltage, 1) + 
+                       ", M2_A:" + String(m2_sec2.avgCurrent, 2) + 
+                       ", M2_kW:" + String(m2_sec2.totalActivePower, 2) +
+                       " | OilT:" + String(tprData.oilTemp) + "C" +
+                       ", HVT:" + String(tprData.hvTemp) + "C" +
+                       ", LVT:" + String(tprData.lvTemp) + "C" +
+                       " | Tap:" + String(oltcData.currentTap) + 
+                       ", TapOps:" + String(oltcData.tapCounter) +
+                       ", mA:" + String(analog_4_20mA_val, 2) +
+                       " | DI:[" + String(digitalRead(DI_PIN_1)) + String(digitalRead(DI_PIN_2)) + 
+                                   String(digitalRead(DI_PIN_3)) + String(digitalRead(DI_PIN_4)) + 
+                                   String(digitalRead(DI_PIN_5)) + String(digitalRead(DI_PIN_6)) + "]";
+      logDataToSD(logLine);
+    }
+
+    // 3. 🔄 Sab save hone ke baad flags reset karein!
     force_mqtt_publish = false;
     current_alarm_cause = "";
   }
-
-    // 💾 SAVE TELEMETRY LOG SUMMARY TO SD CARD WITH RTC TIMESTAMP
-  if (sd_card_mounted) {
-    String logLine = "M1_kWh:" + String(m1_sec1.totalActive_kWh, 2) + 
-                     ", M1_V:" + String(m1_sec2.avgLineVoltage, 1) + 
-                     ", M1_A:" + String(m1_sec2.avgCurrent, 2) + 
-                     ", M1_kW:" + String(m1_sec2.totalActivePower, 2) +
-                     " | M2_kWh:" + String(m2_sec1.totalActive_kWh, 2) + 
-                     ", M2_V:" + String(m2_sec2.avgLineVoltage, 1) + 
-                     ", M2_A:" + String(m2_sec2.avgCurrent, 2) + 
-                     ", M2_kW:" + String(m2_sec2.totalActivePower, 2) +
-                     " | OilT:" + String(tprData.oilTemp) + "C" +
-                     ", HVT:" + String(tprData.hvTemp) + "C" +
-                     ", LVT:" + String(tprData.lvTemp) + "C" +
-                     " | Tap:" + String(oltcData.currentTap) + 
-                     ", TapOps:" + String(oltcData.tapCounter) +
-                     ", mA:" + String(analog_4_20mA_val, 2) +
-                     " | DI:[" + String(digitalRead(DI_PIN_1)) + String(digitalRead(DI_PIN_2)) + 
-                                 String(digitalRead(DI_PIN_3)) + String(digitalRead(DI_PIN_4)) + 
-                                 String(digitalRead(DI_PIN_5)) + String(digitalRead(DI_PIN_6)) + "]";
-    logDataToSD(logLine);
-  }
-
 
   // Serial.print("[SYS] Free heap: "); Serial.println(ESP.getFreeHeap());
 
