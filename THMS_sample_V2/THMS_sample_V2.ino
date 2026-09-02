@@ -26,6 +26,14 @@
 #define DI_PIN_5  40   // 👈 Naya: Digital Input 5
 #define DI_PIN_6  14    // 👈 Naya: Digital Input 6
 
+// --------------------------------------------------------------------------
+// 🚨 TIMERS & ALARM LOGIC
+// --------------------------------------------------------------------------
+uint32_t last_meter_read_time = 0;
+bool     force_mqtt_publish   = false;
+String   current_alarm_cause  = "";
+bool     last_di_states[6]    = {false, false, false, false, false, false};
+
 
 // --------------------------------------------------------------------------
 // SD CARD & DS3231 RTC CONFIG
@@ -87,13 +95,17 @@ char        mqtt_sub_topic[64]; // transformer/<MAC>/tx (Dashboard Commands)
 // --------------------------------------------------------------------------
 // MQTT CONFIG
 // --------------------------------------------------------------------------
-const char* mqtt_broker = "otplai.com";
-const int   mqtt_port   = 8883;
-const char* mqtt_user   = "oxmo";
-const char* mqtt_pass   = "123456789";
+String mqtt_broker = "otplai.com";
+int    mqtt_port   = 8883;
+String mqtt_user   = "oxmo";
+String mqtt_pass   = "123456789";
 const char* device_id   = "OXMO_GW_01";
 char        mqtt_topic[64];
 
+uint32_t upload_interval_sec = 60; // 👈 Dashboard se change hoga (Default 60s)
+int      alarm_oil_temp      = 80; // 👈 Default threshold
+int      alarm_hv_temp       = 90;
+int      alarm_lv_temp       = 90;
 // --------------------------------------------------------------------------
 // RS485 & MODBUS SLAVE CONFIG
 // --------------------------------------------------------------------------
@@ -271,25 +283,15 @@ void read4to20mASensor() {
 static int      stableTapCandidate = -1;
 static uint32_t tapCandidateTimer  = 0;
 
-// 17 Taps ke Exact Standard Voltages:
-const float TAP_VOLTAGES[17] = {
-  0.000, // Tap 1
-  0.190, // Tap 2
-  0.380, // Tap 3
-  0.575, // Tap 4
-  0.770, // Tap 5
-  0.960, // Tap 6
-  1.160, // Tap 7
-  1.350, // Tap 8
-  1.540, // Tap 9  👈 (1.74V iske sabse kareeb hai)
-  1.740, // Tap 10
-  1.930, // Tap 11
-  2.120, // Tap 12
-  2.320, // Tap 13
-  2.510, // Tap 14 👈 (2.55V aate hi yeh activate hoga)
-  2.710, // Tap 15
-  2.910, // Tap 16
-  3.100  // Tap 17
+// 📌 17 Taps ke Voltages (Web Portal se modify ho sakte hain aur Flash me save honge):
+float TAP_VOLTAGES[17] = {
+  0.000, 0.190, 0.380, 0.575, 0.770, 0.960, 1.160, 1.350, 1.540,
+  1.740, 1.930, 2.120, 2.320, 2.510, 2.710, 2.910, 3.100
+};
+// Factory Defaults (Agar Reset karna ho):
+const float DEFAULT_TAP_VOLTAGES[17] = {
+  0.000, 0.190, 0.380, 0.575, 0.770, 0.960, 1.160, 1.350, 1.540,
+  1.740, 1.930, 2.120, 2.320, 2.510, 2.710, 2.910, 3.100
 };
 
 // 📌 Function: Jo Tap sabse kareeb hoga, wahi choose karega
@@ -319,8 +321,8 @@ void readOLTCSensor() {
   oltc_live_voltage = voltage;                   // 👈 MQTT aur Web ke liye save
 
   // Debug Serial: Multimeter aur Code ka voltage live dekhein
-  Serial.printf("🔍 [TAP LIVE] Voltage: %.3f V | Nearest: Tap %d | Active: Tap %d | Ops: %u\n", 
-                voltage, getNearestTap(voltage), oltcData.currentTap, oltcData.tapCounter);
+  // Serial.printf("🔍 [TAP LIVE] Voltage: %.3f V | Nearest: Tap %d | Active: Tap %d | Ops: %u\n", 
+  //               voltage, getNearestTap(voltage), oltcData.currentTap, oltcData.tapCounter);
 
   // Wire Cut / Disconnect check (<0.30V ya >3.35V)
   if (voltage > 3.35) {
@@ -702,20 +704,20 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
 void reconnectMQTT() {
   secureClient.setInsecure(); 
-  mqttClient.setServer(mqtt_broker, mqtt_port);
-  mqttClient.setCallback(mqttCallback);  // 👈 Ye line add karein
+  mqttClient.setServer(mqtt_broker.c_str(), mqtt_port); // 👈 Updated
+  mqttClient.setCallback(mqttCallback);  
   mqttClient.setBufferSize(6144);
 
   Serial.print("[MQTT] Connecting to "); Serial.print(mqtt_broker); Serial.println(" ...");
-  // if (mqttClient.connect(device_id, mqtt_user, mqtt_pass)) {
   String client_id_unique = "OXMO_" + getESP32HardwareMAC();
-  if (mqttClient.connect(client_id_unique.c_str(), mqtt_user, mqtt_pass)) {
+  if (mqttClient.connect(client_id_unique.c_str(), mqtt_user.c_str(), mqtt_pass.c_str())) { // 👈 Updated
     Serial.println("[MQTT] CONNECTED! ✅");
-    mqttClient.subscribe(mqtt_sub_topic); // 👈 Ye line add karein
+    mqttClient.subscribe(mqtt_sub_topic); 
   } else {
     Serial.print("[MQTT] FAILED, state="); Serial.println(mqttClient.state());
   }
 }
+
 
 // --------------------------------------------------------------------------
 // 🖨️ HELPER: PRINT ALL 66 REGISTERS FOR A METER
@@ -968,7 +970,7 @@ void addMeterToJSON(JsonObject &meterObj, bool isOnline, EnergyData &sec1, Insta
   thdObj["thd_vCN"]    = sec3.thdVoltageCN;
 }
 
-void publishMQTTTelemetry() {
+void publishMQTTTelemetry(String trigger_cause) {
   DynamicJsonDocument doc(6144); 
 
   int cur_val  = last_valid_rssi;
@@ -977,6 +979,7 @@ void publishMQTTTelemetry() {
 
   // 1. SYSTEM TELEMETRY
   JsonObject sysObj = doc.createNestedObject("sys");
+  sysObj["trigger"]        = trigger_cause; // 👈 NAYA: "DI_1_ALARM" ya "1_MIN_HEARTBEAT"
   sysObj["ppp_ip"]         = ppp_got_ip;
   sysObj["mqtt_connected"] = mqttClient.connected();
   sysObj["data_available"] = true;               
@@ -1051,79 +1054,236 @@ void publishMQTTTelemetry() {
 WebServer localServer(80);
 
 void handleRoot() {
-  String html = "<!DOCTYPE html><html lang='en'><head>";
-  html += "<meta charset='UTF-8'>"; // 👈 Isse saare symbols aur emojis 100% clean dikhenge
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-  html += "<title>OXMO OLTC Portal</title>";
+  String html = "";
+  html.reserve(7000); 
+  
+  html += "<!DOCTYPE html><html lang='en'><head>";
+  html += "<meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  html += "<title>OXMO Gateway Config</title>";
   html += "<style>";
-  html += "*{box-sizing:border-box;margin:0;padding:0;}";
-  html += "body{font-family:'Segoe UI',Roboto,sans-serif;background:#0b1329;color:#fff;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:15px;}";
-  html += ".card{background:#16223f;border:1px solid #233560;padding:25px;border-radius:16px;width:100%;max-width:400px;box-shadow:0 10px 30px rgba(0,0,0,0.5);text-align:center;}";
-  html += "h2{color:#00f2fe;font-size:22px;margin-bottom:20px;letter-spacing:0.5px;}";
-  html += ".stat-box{background:#0d182e;border:1px solid #1f3256;padding:12px 16px;border-radius:10px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:15px;}";
-  html += ".stat-label{color:#94a3b8;font-weight:500;}";
-  html += ".stat-val{color:#38bdf8;font-weight:bold;font-size:16px;}";
-  html += ".tap-badge{background:#0284c7;color:#fff;padding:4px 10px;border-radius:20px;font-size:14px;font-weight:bold;}";
-  html += "hr{border:none;border-top:1px solid #233560;margin:20px 0;}";
-  html += "h3{color:#f8fafc;font-size:16px;margin-bottom:12px;}";
-  html += "input{width:100%;padding:12px;font-size:16px;background:#0a1224;border:1px solid #00f2fe;color:#fff;border-radius:8px;text-align:center;margin-bottom:15px;outline:none;}";
-  html += "input:focus{border-color:#38bdf8;box-shadow:0 0 10px rgba(0,242,254,0.3);}";
-  html += "button{width:100%;padding:13px;font-size:16px;font-weight:bold;background:linear-gradient(135deg, #00f2fe, #4facfe);color:#000;border:none;border-radius:8px;cursor:pointer;transition:0.2s;}";
-  html += "button:hover{opacity:0.9;transform:scale(0.99);}";
+  html += ":root { --bg: #0f172a; --card: #1e293b; --border: #334155; --text: #f8fafc; --text-muted: #94a3b8; --accent: #0ea5e9; --success: #10b981; }";
+  html += "* { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Roboto, sans-serif; }";
+  html += "body { background: var(--bg); color: var(--text); padding: 15px; display: flex; justify-content: center; }";
+  html += ".container { max-width: 600px; width: 100%; }";
+  
+  html += ".header { text-align: center; padding: 10px 0 20px; font-size: 26px; font-weight: bold; }";
+  html += ".header span { color: var(--accent); }";
+  
+  /* Top Stats */
+  html += ".stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 20px; }";
+  html += ".stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 15px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }";
+  html += ".stat-card .label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 6px; letter-spacing: 1px; }";
+  html += ".stat-card .val { font-size: 22px; font-weight: bold; color: var(--text); }";
+  
+  /* Tabs System */
+  html += ".tabs { display: flex; gap: 5px; margin-bottom: 15px; background: var(--card); padding: 6px; border-radius: 10px; border: 1px solid var(--border); }";
+  html += ".tab-btn { flex: 1; padding: 10px; text-align: center; font-size: 14px; font-weight: 600; color: var(--text-muted); cursor: pointer; border-radius: 8px; transition: 0.2s; }";
+  html += ".tab-btn.active { background: var(--accent); color: #fff; }";
+  
+  html += ".tab-content { display: none; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; animation: fadeIn 0.3s; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }";
+  html += ".tab-content.active { display: block; }";
+  html += "@keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }";
+  
+  /* Inputs */
+  html += ".form-group { margin-bottom: 15px; }";
+  html += "label { display: block; font-size: 13px; color: var(--text-muted); margin-bottom: 5px; font-weight: 500;}";
+  html += "input { width: 100%; background: #0b1120; border: 1px solid var(--border); color: var(--text); padding: 10px; border-radius: 8px; font-size: 14px; outline: none; }";
+  html += "input:focus { border-color: var(--accent); }";
+  html += ".input-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }";
+  html += ".tap-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; max-height: 250px; overflow-y: auto; padding-right: 5px; }";
+  
+  /* Buttons */
+  html += "button { width: 100%; padding: 12px; font-size: 14px; font-weight: bold; color: #fff; background: var(--accent); border: none; border-radius: 8px; cursor: pointer; margin-top: 5px; }";
+  
+  html += "::-webkit-scrollbar { width: 6px; }";
+  html += "::-webkit-scrollbar-track { background: transparent; }";
+  html += "::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }";
   html += "</style>";
-  html += "<script>setTimeout(()=>{location.reload();}, 3000);</script>"; // 👈 Har 3 second me live value auto refresh hogi
+  
+  html += "<script>";
+  html += "function openTab(event, id) {";
+  html += "  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));";
+  html += "  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));";
+  html += "  document.getElementById(id).classList.add('active');";
+  html += "  event.currentTarget.classList.add('active');";
+  html += "}";
+  
+  // AJAX BACKGROUND REFRESH (No page reload needed!)
+  html += "setInterval(() => {";
+  html += "  fetch('/api/data').then(r => r.json()).then(data => {";
+  html += "    document.getElementById('val_ma').innerText = data.mA.toFixed(2) + ' mA';";
+  html += "    document.getElementById('val_v').innerText = data.volt.toFixed(3) + ' V';";
+  html += "    document.getElementById('val_tap').innerText = 'Tap ' + data.tap;";
+  html += "    document.getElementById('val_ops').innerText = data.ops;";
+  html += "  }).catch(e => console.log('Wait'));";
+  html += "}, 2000);"; // Har 2 sec me background update
+  html += "</script>";
   html += "</head><body>";
-  html += "<div class='card'>";
-  html += "<h2>⚡ OXMO OLTC Config Portal</h2>";
   
-  html += "<div class='stat-box'><span class='stat-label'>📡 4-20mA Signal:</span><span class='stat-val'>" + String(analog_4_20mA_val, 2) + " mA</span></div>";
-  html += "<div class='stat-box'><span class='stat-label'>🎛️ Live Tap Position:</span><span class='tap-badge'>Tap " + String(oltcData.currentTap) + " / 17</span></div>";
-  html += "<div class='stat-box'><span class='stat-label'>🔢 Total Tap Counter:</span><span class='stat-val'>" + String(oltcData.tapCounter) + " Ops</span></div>";
+  html += "<div class='container'>";
+  html += "<div class='header'>⚡ OXMO <span>Gateway</span></div>";
   
-  html += "<hr>";
-  html += "<h3>⚙️ Calibrate Initial Counter</h3>";
-  html += "<form action='/set_counter' method='POST'>";
-  html += "<input type='number' name='count_val' placeholder='Enter Initial Count' required>";
-  html += "<button type='submit'>Save to Flash 💾</button>";
-  html += "</form>";
-  html += "</div></body></html>";
+  // 📊 Live Background Updating Stats
+  html += "<div class='stats-grid'>";
+  html += "<div class='stat-card'><div class='label'>4-20mA Sensor</div><div class='val' id='val_ma'>" + String(analog_4_20mA_val, 2) + " mA</div></div>";
+  html += "<div class='stat-card'><div class='label'>OLTC Voltage</div><div class='val' style='color:var(--success);' id='val_v'>" + String(oltc_live_voltage, 3) + " V</div></div>";
+  html += "<div class='stat-card'><div class='label'>Live Tap Pos</div><div class='val' id='val_tap'>Tap " + String(oltcData.currentTap) + "</div></div>";
+  html += "<div class='stat-card'><div class='label'>Total Operations</div><div class='val' id='val_ops'>" + String(oltcData.tapCounter) + "</div></div>";
+  html += "</div>";
 
-  localServer.send(200, "text/html; charset=utf-8", html); // 👈 charset=utf-8 ensures 100% clean text
+  // 📑 Tabs Buttons
+  html += "<div class='tabs'>";
+  html += "<div class='tab-btn active' onclick=\"openTab(event, 'tab1')\">🌐 Network</div>";
+  html += "<div class='tab-btn' onclick=\"openTab(event, 'tab2')\">🚨 Alarms</div>";
+  html += "<div class='tab-btn' onclick=\"openTab(event, 'tab3')\">🎛️ Tap Calib</div>";
+  html += "</div>";
+
+  // 🌐 TAB 1: Network Settings
+  html += "<div id='tab1' class='tab-content active'>";
+  html += "<form action='/set_config' method='POST'>";
+  // Hidden inputs for Temp Alarms (Taki network save karte time alarms delete na ho jaye)
+  html += "<input type='hidden' name='alrm_oil' value='" + String(alarm_oil_temp) + "'>";
+  html += "<input type='hidden' name='alrm_hv' value='" + String(alarm_hv_temp) + "'>";
+  html += "<input type='hidden' name='alrm_lv' value='" + String(alarm_lv_temp) + "'>";
+  
+  html += "<div class='form-group'><label>MQTT Broker URL / IP</label><input type='text' name='mq_broker' value='" + mqtt_broker + "' required></div>";
+  html += "<div class='input-grid'>";
+  html += "<div class='form-group'><label>Port</label><input type='number' name='mq_port' value='" + String(mqtt_port) + "' required></div>";
+  html += "<div class='form-group'><label>Heartbeat (Secs)</label><input type='number' name='up_int' value='" + String(upload_interval_sec) + "' required></div>";
+  html += "<div class='form-group'><label>Username</label><input type='text' name='mq_user' value='" + mqtt_user + "' required></div>";
+  html += "<div class='form-group'><label>Password</label><input type='text' name='mq_pass' value='" + mqtt_pass + "' required></div>";
+  html += "</div>";
+  html += "<button type='submit'>Save Network Settings 💾</button>";
+  html += "</form></div>";
+
+  // 🚨 TAB 2: Alarm Settings
+  html += "<div id='tab2' class='tab-content'>";
+  html += "<form action='/set_config' method='POST'>";
+  // Hidden inputs for Network (Taki alarm save karte time network delete na ho)
+  html += "<input type='hidden' name='mq_broker' value='" + mqtt_broker + "'>";
+  html += "<input type='hidden' name='mq_port' value='" + String(mqtt_port) + "'>";
+  html += "<input type='hidden' name='up_int' value='" + String(upload_interval_sec) + "'>";
+  html += "<input type='hidden' name='mq_user' value='" + mqtt_user + "'>";
+  html += "<input type='hidden' name='mq_pass' value='" + mqtt_pass + "'>";
+  
+  html += "<h4 style='color:var(--text); margin-bottom:15px; font-weight:normal;'>TPR-702 Temperature Thresholds (°C)</h4>";
+  html += "<div class='input-grid' style='grid-template-columns: repeat(3, 1fr);'>";
+  html += "<div class='form-group'><label>Oil Limit</label><input type='number' name='alrm_oil' value='" + String(alarm_oil_temp) + "' required></div>";
+  html += "<div class='form-group'><label>HV Limit</label><input type='number' name='alrm_hv' value='" + String(alarm_hv_temp) + "' required></div>";
+  html += "<div class='form-group'><label>LV Limit</label><input type='number' name='alrm_lv' value='" + String(alarm_lv_temp) + "' required></div>";
+  html += "</div>";
+  html += "<button type='submit'>Save Alarm Settings 🚨</button>";
+  html += "</form></div>";
+
+  // 🎛️ TAB 3: Tap Calibration
+  html += "<div id='tab3' class='tab-content'>";
+  html += "<form action='/set_counter' method='POST'>";
+  html += "<div class='input-grid' style='align-items:end;'>";
+  html += "<div class='form-group' style='margin:0;'><label>Override Base Counter</label><input type='number' name='count_val' required></div>";
+  html += "<div><button type='submit' style='margin:0;'>Update</button></div>";
+  html += "</div></form>";
+  
+  html += "<hr style='border:none; border-top:1px dashed var(--border); margin:20px 0;'>";
+  html += "<label>17-Tap Voltage Mapping (Volts)</label>";
+  html += "<form action='/set_voltages' method='POST'>";
+  html += "<div class='tap-grid'>";
+  for (int i = 0; i < 17; i++) {
+    html += "<div class='form-group' style='margin-bottom:0;'><label style='font-size:11px;'>Tap " + String(i + 1) + "</label>";
+    html += "<input type='number' step='0.001' name='tap_" + String(i + 1) + "' value='" + String(TAP_VOLTAGES[i], 3) + "' required></div>";
+  }
+  html += "</div>";
+  html += "<button type='submit' style='margin-top:15px;'>Save Voltages to Flash</button>";
+  html += "</form>";
+  html += "</div>";
+
+  html += "</div></body></html>";
+  localServer.send(200, "text/html; charset=utf-8", html);
 }
+
 
 void handleSetCounter() {
   if (localServer.hasArg("count_val")) {
     uint32_t newCount = localServer.arg("count_val").toInt();
     oltcData.tapCounter = newCount;
-    nvsStorage.putUInt("tap_count", newCount); // Save to Flash NVS
-    Serial.printf("\n📱 [LOCAL WEB PORTAL] Tap Counter Successfully Calibrated To: %u\n", newCount);
-
-    String html = "<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>";
-    html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-    html += "<style>body{font-family:sans-serif;background:#0b1329;color:#fff;display:flex;justify-content:center;align-items:center;min-height:100vh;text-align:center;padding:20px;}";
-    html += ".box{background:#16223f;border:1px solid #22c55e;padding:30px;border-radius:16px;max-width:380px;box-shadow:0 10px 30px rgba(0,0,0,0.5);}";
-    html += "h2{color:#22c55e;margin-bottom:15px;}";
-    html += "p{color:#94a3b8;margin-bottom:20px;font-size:16px;}";
-    html += "a{display:inline-block;padding:10px 20px;background:#00f2fe;color:#000;text-decoration:none;border-radius:8px;font-weight:bold;}";
-    html += "</style></head><body>";
-    html += "<div class='box'><h2>✅ Successfully Saved!</h2>";
-    html += "<p>New Tap Counter is calibrated to: <b style='color:#fff;'>" + String(newCount) + "</b></p>";
-    html += "<a href='/'>⬅️ Back to Portal</a></div></body></html>";
-
-    localServer.send(200, "text/html; charset=utf-8", html);
+    nvsStorage.putUInt("tap_count", newCount);
+    Serial.printf("\n📱 [PORTAL] Tap Counter Calibrated To: %u\n", newCount);
+    localServer.sendHeader("Location", "/");
+    localServer.send(303);
   }
+}
+
+// 📌 17 Taps Ke Custom Voltages Flash me Save Karne Ka Handler
+void handleSetVoltages() {
+  for (int i = 0; i < 17; i++) {
+    String fieldName = "tap_" + String(i + 1);
+    if (localServer.hasArg(fieldName)) {
+      TAP_VOLTAGES[i] = localServer.arg(fieldName).toFloat();
+    }
+  }
+  nvsStorage.putBytes("tap_volts", TAP_VOLTAGES, sizeof(TAP_VOLTAGES));
+  Serial.println("\n✅ [PORTAL] All 17 Tap Voltages Successfully Saved to Flash NVS!\n");
+
+  localServer.sendHeader("Location", "/");
+  localServer.send(303);
+}
+
+// 📌 Factory Defaults Restore Karne Ka Handler
+void handleResetVoltages() {
+  memcpy(TAP_VOLTAGES, DEFAULT_TAP_VOLTAGES, sizeof(TAP_VOLTAGES));
+  nvsStorage.putBytes("tap_volts", TAP_VOLTAGES, sizeof(TAP_VOLTAGES));
+  Serial.println("\n🔄 [PORTAL] Tap Voltages Restored to Factory Defaults!\n");
+
+  localServer.sendHeader("Location", "/");
+  localServer.send(303);
+}
+
+// 👇👇👇 YAHAN PAR NAYA FUNCTION PASTE KAREIN 👇👇👇
+void handleSetConfig() {
+  if (localServer.hasArg("mq_broker")) {
+    mqtt_broker = localServer.arg("mq_broker"); nvsStorage.putString("mq_broker", mqtt_broker);
+    mqtt_port   = localServer.arg("mq_port").toInt(); nvsStorage.putUInt("mq_port", mqtt_port);
+    mqtt_user   = localServer.arg("mq_user"); nvsStorage.putString("mq_user", mqtt_user);
+    mqtt_pass   = localServer.arg("mq_pass"); nvsStorage.putString("mq_pass", mqtt_pass);
+    
+    upload_interval_sec = localServer.arg("up_int").toInt(); nvsStorage.putUInt("up_int", upload_interval_sec);
+    alarm_oil_temp      = localServer.arg("alrm_oil").toInt(); nvsStorage.putUInt("alrm_oil", alarm_oil_temp);
+    alarm_hv_temp       = localServer.arg("alrm_hv").toInt(); nvsStorage.putUInt("alrm_hv", alarm_hv_temp);
+    alarm_lv_temp       = localServer.arg("alrm_lv").toInt(); nvsStorage.putUInt("alrm_lv", alarm_lv_temp);
+    Serial.println("\n✅ [PORTAL] Config Updated! Disconnecting MQTT to apply live... ");
+    if (mqttClient.connected()) {
+      mqttClient.disconnect(); // 👈 Bina ESP32 Restart kiye Agli hi second naye server par connect kar lega!
+    }
+  }
+  localServer.sendHeader("Location", "/");
+  localServer.send(303);
+}
+
+// 👇 YEH NAYA FUNCTION ADD KAREIN (Background me live stats bhejne ke liye)
+void handleLiveStats() {
+  String json = "{";
+  json += "\"mA\":" + String(analog_4_20mA_val, 2) + ",";
+  json += "\"volt\":" + String(oltc_live_voltage, 3) + ",";
+  json += "\"tap\":" + String(oltcData.currentTap) + ",";
+  json += "\"ops\":" + String(oltcData.tapCounter);
+  json += "}";
+  localServer.send(200, "application/json", json);
 }
 
 void setupLocalWebPortal() {
   WiFi.mode(WIFI_AP);
   WiFi.softAP("OXMO_GATEWAY_CONFIG", "12345678");
-  Serial.println("📱 [WIFI AP] Hotspot Started: OXMO_GATEWAY_CONFIG (Password: 12345678)");
+  Serial.println("📱 [WIFI AP] Hotspot: OXMO_GATEWAY_CONFIG (Password: 12345678)");
   Serial.println("🌐 [WEB PORTAL] Open: http://192.168.4.1");
 
   localServer.on("/", handleRoot);
   localServer.on("/set_counter", HTTP_POST, handleSetCounter);
+  localServer.on("/set_voltages", HTTP_POST, handleSetVoltages); // 👈 Naya Handler
+  localServer.on("/reset_voltages", HTTP_POST, handleResetVoltages); // 👈 Reset Handler
+  localServer.on("/set_config", HTTP_POST, handleSetConfig); // 👈 Yeh line add karni hai
+  localServer.on("/api/data", HTTP_GET, handleLiveStats); // 👈 BAS YEH 1 LINE NAYI ADD KAREIN
   localServer.begin();
 }
+
 
 
 // --------------------------------------------------------------------------
@@ -1144,14 +1304,41 @@ void setup() {
   pinMode(DI_PIN_5, INPUT_PULLUP);  // 👈 Naya
   pinMode(DI_PIN_6, INPUT_PULLUP);  // 👈 Naya
 
+  // 👇 YEH NAYA ADD KAREIN (Bootup par current status save karne ke liye):
+  last_di_states[0] = digitalRead(DI_PIN_1);
+  last_di_states[1] = digitalRead(DI_PIN_2);
+  last_di_states[2] = digitalRead(DI_PIN_3);
+  last_di_states[3] = digitalRead(DI_PIN_4);
+  last_di_states[4] = digitalRead(DI_PIN_5);
+  last_di_states[5] = digitalRead(DI_PIN_6);
+
   // 👇 BAS YEH 1 LINE ADD KAR DIJIYE:
   pinMode(OLTC_TAP_PIN, INPUT_PULLDOWN); // 👈 Hawa me Pin 10 ko 0V par lock rakhega!
 
     // 👇 YAHAN PASTE KAREIN (Flash Memory se Tap Counter Load):
   nvsStorage.begin("oltc_nvs", false);
+
+  // 👇 YEH 9 LINES NAYI ADD KAREIN:
+  mqtt_broker = nvsStorage.getString("mq_broker", "otplai.com");
+  mqtt_port   = nvsStorage.getUInt("mq_port", 8883);
+  mqtt_user   = nvsStorage.getString("mq_user", "oxmo");
+  mqtt_pass   = nvsStorage.getString("mq_pass", "123456789");
+  
+  upload_interval_sec = nvsStorage.getUInt("up_int", 60);
+  alarm_oil_temp      = nvsStorage.getUInt("alrm_oil", 80);
+  alarm_hv_temp       = nvsStorage.getUInt("alrm_hv", 90);
+  alarm_lv_temp       = nvsStorage.getUInt("alrm_lv", 90);
+
   oltcData.tapCounter = nvsStorage.getUInt("tap_count", 0);
   oltcData.currentTap = 1;
   oltcData.sensor_ok  = false;
+  // 👇 YEH NAYA CODE ADD KAREIN (Saved Tap Voltages Load):
+  size_t vLen = nvsStorage.getBytes("tap_volts", TAP_VOLTAGES, sizeof(TAP_VOLTAGES));
+  if (vLen == sizeof(TAP_VOLTAGES)) {
+    Serial.println("💾 [FLASH NVS] Loaded Custom Tap Voltages from Flash! ✅");
+  } else {
+    Serial.println("💾 [FLASH NVS] Using Default Tap Voltages.");
+  }
   Serial.printf("\n💾 [FLASH NVS] Loaded Tap Counter: %u\n", oltcData.tapCounter);
 
   // 📌 RECONFIGURE WDT TO 60 SECONDS SAFELY
@@ -1257,26 +1444,68 @@ void loop() {
     reconnectMQTT();
   }
 
-    // 📌 1. READ SCHNEIDER METER 1 (Slave ID: 1)
-  m1_online = readSchneiderMeter(SCHNEIDER_1_ID, m1_sec1, m1_sec2, m1_sec3);
-  delay(50); // RS485 Bus Gap
+    // ==========================================================
+  // ⚡ FAST LOOP: HAR 200ms ME ALARM & TAP CHANGE MONITOR KAREGA
+  // ==========================================================
+  bool current_di[6] = {
+    digitalRead(DI_PIN_1), digitalRead(DI_PIN_2), digitalRead(DI_PIN_3),
+    digitalRead(DI_PIN_4), digitalRead(DI_PIN_5), digitalRead(DI_PIN_6)
+  };
+  
+  for(int i = 0; i < 6; i++) {
+    if(current_di[i] != last_di_states[i]) {
+      last_di_states[i] = current_di[i]; 
+      force_mqtt_publish = true;         
+      current_alarm_cause = "DI_" + String(i+1) + "_ALARM";
+      Serial.println("\n🚨 [ALARM TRIGGERED] " + current_alarm_cause);
+    }
+  }
+  int oldTap = oltcData.currentTap;
+  readOLTCSensor(); 
+  if (oltcData.currentTap != oldTap) {
+    force_mqtt_publish = true;
+    current_alarm_cause = "OLTC_TAP_CHANGED";
+    Serial.println("\n🎛️ [TAP CHANGED] Publishing Immediately!");
+  }
+  // ==========================================================
+  // ⏳ SLOW LOOP: HAR 1 MINUTE (60000ms) ME MODBUS READ KAREGA
+  // ==========================================================
+  if (millis() - last_meter_read_time >= (upload_interval_sec * 1000) || last_meter_read_time == 0) {
+    last_meter_read_time = millis();
+    
+    Serial.println("\n⏱️ [HEARTBEAT] 1-Minute Modbus Meter Reading Started...");
+    
+    m1_online = readSchneiderMeter(SCHNEIDER_1_ID, m1_sec1, m1_sec2, m1_sec3);
+    delay(50); 
+    m2_online = readSchneiderMeter(SCHNEIDER_2_ID, m2_sec1, m2_sec2, m2_sec3);
+    delay(50); 
+    tprData.is_valid = readTPR702(TPR702_ID, tprData.oilTemp, tprData.hvTemp, tprData.lvTemp);
 
-  // 📌 2. READ SCHNEIDER METER 2 (Slave ID: 3)
-  m2_online = readSchneiderMeter(SCHNEIDER_2_ID, m2_sec1, m2_sec2, m2_sec3);
-  delay(50); // RS485 Bus Gap
-
-  // 📌 3. READ TPR-702 TEMPERATURE CONTROLLER (Slave ID: 2)
-  tprData.is_valid = readTPR702(TPR702_ID, tprData.oilTemp, tprData.hvTemp, tprData.lvTemp);
-  delay(50);
-
-  // 📌 4. READ 4-20mA OLTC SENSOR
-  read4to20mASensor();
-
-  // 📌 5. READ DEDICATED OLTC TAP POSITION & COUNTER (GPIO 10)
-  readOLTCSensor();
-
-  // 📌 6. PRINT FULL SCAN TO SERIAL & LOG TO SD CARD
-  printAllDataToSerial();
+     // 👇 YEH ALARM CHECK ADD KAREIN:
+    if (tprData.is_valid) {
+      if (tprData.oilTemp >= alarm_oil_temp)      current_alarm_cause = "HIGH_OIL_TEMP_ALARM";
+      else if (tprData.hvTemp >= alarm_hv_temp)   current_alarm_cause = "HIGH_HV_TEMP_ALARM";
+      else if (tprData.lvTemp >= alarm_lv_temp)   current_alarm_cause = "HIGH_LV_TEMP_ALARM";
+    }
+    
+    read4to20mASensor();
+    
+    printAllDataToSerial(); // Log Full Data to Serial and SD Card
+    
+    // Heartbeat par bhi force publish karein
+    force_mqtt_publish = true; 
+    if (current_alarm_cause == "") {
+      current_alarm_cause = String(upload_interval_sec) + "_SEC_HEARTBEAT";
+    }
+  }
+  // ==========================================================
+  // 📤 PUBLISH TO MQTT (Jab Alarm aayega ya 1-Min poora hoga)
+  // ==========================================================
+  if (force_mqtt_publish && ppp_got_ip && mqttClient.connected()) {
+    publishMQTTTelemetry(current_alarm_cause);
+    force_mqtt_publish = false;
+    current_alarm_cause = "";
+  }
 
     // 💾 SAVE TELEMETRY LOG SUMMARY TO SD CARD WITH RTC TIMESTAMP
   if (sd_card_mounted) {
@@ -1300,17 +1529,16 @@ void loop() {
     logDataToSD(logLine);
   }
 
-  if (mqttClient.connected()) {
-    publishMQTTTelemetry();
-  }
 
-  Serial.print("[SYS] Free heap: "); Serial.println(ESP.getFreeHeap());
+  // Serial.print("[SYS] Free heap: "); Serial.println(ESP.getFreeHeap());
 
-  // 📌 WDT-SAFE 5 SECOND DELAY LOOP
+  // 📌 WDT-SAFE SHORT DELAY (Ab yeh 5 second ki jagah sirf 200ms rukega)
+  // Taaki DI Alarm aur OLTC Tap ki scanning lagataar super-fast speed me hoti rahe!
   uint32_t delayStart = millis();
-  while (millis() - delayStart < 5000) {
+  while (millis() - delayStart < 200) {
     esp_task_wdt_reset();
-    localServer.handleClient(); // 👈 Ye line add karein
-    delay(200);
+    localServer.handleClient(); 
+    delay(20);
   }
 }
+
