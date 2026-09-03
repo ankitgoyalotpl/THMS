@@ -114,10 +114,16 @@ int      alarm_lv_temp       = 90;
 #define RS485_RX_PIN    18
 #define RS485_TX_PIN    17
 // ✅ Ab aisa kar dijiye:
-#define SCHNEIDER_1_ID  1    // Meter 1 (HV / Incomer)
-#define SCHNEIDER_2_ID  3    // 👈 Naya: Meter 2 (LV / Outgoing)
-#define TPR702_ID       2    // TPR-702 Temp Controller
-#define MODBUS_BAUD     9600
+// #define SCHNEIDER_1_ID  1    // Meter 1 (HV / Incomer)
+// #define SCHNEIDER_2_ID  3    // 👈 Naya: Meter 2 (LV / Outgoing)
+// #define TPR702_ID       2    // TPR-702 Temp Controller
+// #define MODBUS_BAUD     9600
+uint8_t schneider_1_id = 1;
+uint8_t schneider_2_id = 3;
+uint8_t tpr702_id      = 2;
+uint32_t modbus_baud   = 9600;
+String modbus_parity   = "8E1"; // Default 8E1
+
 
 HardwareSerial RS485Serial(1);
 
@@ -223,14 +229,14 @@ byte decToBcd(byte val) {
 
 // 💾 DUAL LOGGING HELPER (Serial + SD Card simultaneously)
 void logPrint(String text) {
-  Serial.print(text);
+  // Serial.print(text);
   if (sd_card_mounted && currentLogFile) {
     currentLogFile.print(text);
   }
 }
 
 void logPrintln(String text) {
-  Serial.println(text);
+  // Serial.println(text);
   if (sd_card_mounted && currentLogFile) {
     currentLogFile.println(text);
   }
@@ -358,8 +364,8 @@ void readOLTCSensor() {
       oltcData.tapCounter += stepsMoved;
       nvsStorage.putUInt("tap_count", oltcData.tapCounter);
 
-      Serial.printf("\n⚡ [OLTC SYNCED EVENT] New Tap: %d | Steps: +%d | Total Ops: %u\n\n", 
-                    oltcData.currentTap, stepsMoved, oltcData.tapCounter);
+      // Serial.printf("\n⚡ [OLTC SYNCED EVENT] New Tap: %d | Steps: +%d | Total Ops: %u\n\n", 
+                    // oltcData.currentTap, stepsMoved, oltcData.tapCounter);
 
       stableTapCandidate = -1;
     }
@@ -842,14 +848,14 @@ void printAllDataToSerial() {
   logPrint(" | MQTT: "); logPrintln(mqttClient.connected() ? "ONLINE" : "OFFLINE");
 
   // 📌 1. PRINT ALL 66 REGISTERS OF METER 1
-  printFullMeter66Registers("SCHNEIDER METER 1 (INCOMER)", SCHNEIDER_1_ID, m1_online, m1_sec1, m1_sec2, m1_sec3);
+  printFullMeter66Registers("SCHNEIDER METER 1 (INCOMER)", schneider_1_id, m1_online, m1_sec1, m1_sec2, m1_sec3);
 
   // 📌 2. PRINT ALL 66 REGISTERS OF METER 2
-  printFullMeter66Registers("SCHNEIDER METER 2 (OUTGOING)", SCHNEIDER_2_ID, m2_online, m2_sec1, m2_sec2, m2_sec3);
+  printFullMeter66Registers("SCHNEIDER METER 2 (OUTGOING)", schneider_2_id, m2_online, m2_sec1, m2_sec2, m2_sec3);
 
   // 📌 3. TPR-702 TEMPERATURES
   logPrintln("\n=================================================================");
-  logPrint("   🌡️ TPR-702 TRANSFORMER TEMPERATURE (SLAVE ID: "); logPrint(String(TPR702_ID));
+  logPrint("   🌡️ TPR-702 TRANSFORMER TEMPERATURE (SLAVE ID: "); logPrint(String(tpr702_id));
   logPrintln(tprData.is_valid ? " | STATUS: ONLINE ✅)" : " | STATUS: OFFLINE ❌)");
   logPrintln("=================================================================");
   if (tprData.is_valid) {
@@ -988,6 +994,7 @@ void publishMQTTTelemetry(String trigger_cause) {
   sysObj["rssi"]           = gsm_rssi;           
   sysObj["csq"]            = gsm_csq;            
   sysObj["free_heap"]      = ESP.getFreeHeap();
+  sysObj["timestamp"]      = getFormattedTime();
 
   // 2. DIGITAL INPUTS (DI 1 to DI 6)
   JsonObject digitalObj = doc.createNestedObject("digital_input");
@@ -1027,14 +1034,16 @@ void publishMQTTTelemetry(String trigger_cause) {
   // 👇 YAHAN BAS 'static' LAGA DIJIYE (Stack Overflow 100% Solve):
   static char jsonBuffer[6144]; 
   size_t n = serializeJson(doc, jsonBuffer);
+    Serial.println(jsonBuffer);
 
-  Serial.print("[MQTT] Publishing Complete Telemetry ("); 
-  Serial.print(n); Serial.print(" bytes) to "); Serial.println(mqtt_topic);
+
+  // Serial.print("[MQTT] Publishing Complete Telemetry ("); 
+  // Serial.print(n); Serial.print(" bytes) to "); Serial.println(mqtt_topic);
 
   if (mqttClient.publish(mqtt_topic, jsonBuffer)) {
-    Serial.println("✅ Publish OK (Both Meters 132 Regs Included!)");
+    // Serial.println("✅ Publish OK (Both Meters 132 Regs Included!)");
   } else {
-    Serial.println("❌ Publish FAILED -- Check buffer size!");
+    // Serial.println("❌ Publish FAILED -- Check buffer size!");
   }
 
   // 💾 SAVE EXACT FULL JSON TO SD CARD
@@ -1139,6 +1148,7 @@ void handleRoot() {
   html += "<div class='tab-btn' onclick=\"openTab(event, 'tab2')\">🚨 Alarms</div>";
   html += "<div class='tab-btn' onclick=\"openTab(event, 'tab3')\">🎛️ Tap Calib</div>";
   html += "<div class='tab-btn' onclick=\"openTab(event, 'tab4')\">📶 Wi-Fi</div>"; // 👈 YEH NAYI LINE
+  html += "<div class='tab-btn' onclick=\"openTab(event, 'tab5')\">🔌 Modbus</div>";
   html += "</div>";
 
   // 🌐 TAB 1: Network Settings
@@ -1205,6 +1215,35 @@ void handleRoot() {
   html += "<div class='form-group'><label>Wi-Fi SSID</label><input type='text' name='w_ssid' value='" + wifi_ssid + "' placeholder='Enter Wi-Fi Name'></div>";
   html += "<div class='form-group'><label>Wi-Fi Password</label><input type='text' name='w_pass' value='" + wifi_pass + "' placeholder='Enter Password'></div>";
   html += "<button type='submit'>Save Wi-Fi Credentials 💾</button>";
+  html += "</form></div>";
+
+  // 🔌 TAB 5: Modbus RS485 Setup
+  html += "<div id='tab5' class='tab-content'>";
+  html += "<form action='/set_modbus' method='POST'>";
+  
+  html += "<div class='input-grid'>";
+  html += "<div class='form-group'><label>Baud Rate</label><select name='mb_baud' style='width:100%; padding:10px; border-radius:8px; background:#0b1120; color:white; border:1px solid var(--border);'>";
+  String bauds[] = {"2400", "4800", "9600", "19200", "38400", "57600", "115200"};
+  for (String b : bauds) {
+      html += "<option value='" + b + "'" + (String(modbus_baud) == b ? " selected" : "") + ">" + b + "</option>";
+  }
+  html += "</select></div>";
+  
+  html += "<div class='form-group'><label>Parity / Flow</label><select name='mb_parity' style='width:100%; padding:10px; border-radius:8px; background:#0b1120; color:white; border:1px solid var(--border);'>";
+  String parities[] = {"8N1", "8E1", "8O1", "8N2", "8E2", "8O2"};
+  for (String p : parities) {
+      html += "<option value='" + p + "'" + (modbus_parity == p ? " selected" : "") + ">" + p + "</option>";
+  }
+  html += "</select></div>";
+  html += "</div>";
+
+  html += "<div class='input-grid'>";
+  html += "<div class='form-group'><label>Meter 1 ID</label><input type='number' name='m1_id' value='" + String(schneider_1_id) + "' required></div>";
+  html += "<div class='form-group'><label>Meter 2 ID</label><input type='number' name='m2_id' value='" + String(schneider_2_id) + "' required></div>";
+  html += "<div class='form-group'><label>TPR-702 ID</label><input type='number' name='tpr_id' value='" + String(tpr702_id) + "' required></div>";
+  html += "</div>"; 
+
+  html += "<button type='submit'>Save & Restart Modbus 💾</button>";
   html += "</form></div>";
 
   html += "</div></body></html>";
@@ -1283,6 +1322,46 @@ void handleSetWifi() {
   localServer.send(303);
 }
 
+void handleSetModbus() {
+  if (localServer.hasArg("mb_baud")) {
+    modbus_baud = localServer.arg("mb_baud").toInt();
+    nvsStorage.putUInt("mb_baud", modbus_baud);
+    
+    modbus_parity = localServer.arg("mb_parity");
+    nvsStorage.putString("mb_parity", modbus_parity);
+
+    schneider_1_id = localServer.arg("m1_id").toInt();
+    nvsStorage.putUInt("m1_id", schneider_1_id);
+
+    schneider_2_id = localServer.arg("m2_id").toInt();
+    nvsStorage.putUInt("m2_id", schneider_2_id);
+
+    tpr702_id = localServer.arg("tpr_id").toInt();
+    nvsStorage.putUInt("tpr_id", tpr702_id);
+    
+    Serial.println("\n✅ [PORTAL] Modbus Config Saved! Applying changes live (No Restart)...");
+    
+    // 👇 BINA RESTART KIYE LIVE SERIAL PORT UPDATE 👇
+    uint32_t config = SERIAL_8E1;
+    if (modbus_parity == "8N1") config = SERIAL_8N1;
+    else if (modbus_parity == "8E1") config = SERIAL_8E1;
+    else if (modbus_parity == "8O1") config = SERIAL_8O1;
+    else if (modbus_parity == "8N2") config = SERIAL_8N2;
+    else if (modbus_parity == "8E2") config = SERIAL_8E2;
+    else if (modbus_parity == "8O2") config = SERIAL_8O2;
+
+    RS485Serial.end(); // Purana Port Band karein
+    delay(20);
+    RS485Serial.begin(modbus_baud, config, RS485_RX_PIN, RS485_TX_PIN); // Nayi settings ke sath Start karein
+    Serial.println("🔌 RS485 Port re-initialized with new Baud & Parity!");
+    // 👆 ========================================= 👆
+
+  }
+  
+  localServer.sendHeader("Location", "/");
+  localServer.send(303);
+}
+
 
 // 👇 YEH NAYA FUNCTION ADD KAREIN (Background me live stats bhejne ke liye)
 void handleLiveStats() {
@@ -1308,6 +1387,7 @@ void setupLocalWebPortal() {
   localServer.on("/set_config", HTTP_POST, handleSetConfig); // 👈 Yeh line add karni hai
   localServer.on("/api/data", HTTP_GET, handleLiveStats); // 👈 BAS YEH 1 LINE NAYI ADD KAREIN
   localServer.on("/set_wifi", HTTP_POST, handleSetWifi); // 👈 YEH LINE ADD KAREIN
+  localServer.on("/set_modbus", HTTP_POST, handleSetModbus); // 👈 Yeh nayi line add karni hai
   localServer.begin();
 }
 
@@ -1346,6 +1426,12 @@ void setup() {
   nvsStorage.begin("oltc_nvs", false);
 
   // 👇 YEH 9 LINES NAYI ADD KAREIN:
+  schneider_1_id = nvsStorage.getUInt("m1_id", 1);
+  schneider_2_id = nvsStorage.getUInt("m2_id", 3);
+  tpr702_id      = nvsStorage.getUInt("tpr_id", 2);
+  modbus_baud    = nvsStorage.getUInt("mb_baud", 9600);
+  modbus_parity  = nvsStorage.getString("mb_parity", "8E1");
+
   mqtt_broker = nvsStorage.getString("mq_broker", "otplai.com");
   mqtt_port   = nvsStorage.getUInt("mq_port", 8883);
   mqtt_user   = nvsStorage.getString("mq_user", "oxmo");
@@ -1412,7 +1498,18 @@ void setup() {
     Serial.println("[SD] SD Card Mount Failed! ❌");
   }
 
-  RS485Serial.begin(MODBUS_BAUD, SERIAL_8E1, RS485_RX_PIN, RS485_TX_PIN);
+  // RS485Serial.begin(MODBUS_BAUD, SERIAL_8E1, RS485_RX_PIN, RS485_TX_PIN);
+    // 📌 DYNAMIC RS485 PORT CONFIGURATION
+  uint32_t config = SERIAL_8E1;
+  if (modbus_parity == "8N1") config = SERIAL_8N1;
+  else if (modbus_parity == "8E1") config = SERIAL_8E1;
+  else if (modbus_parity == "8O1") config = SERIAL_8O1;
+  else if (modbus_parity == "8N2") config = SERIAL_8N2;
+  else if (modbus_parity == "8E2") config = SERIAL_8E2;
+  else if (modbus_parity == "8O2") config = SERIAL_8O2;
+
+  RS485Serial.begin(modbus_baud, config, RS485_RX_PIN, RS485_TX_PIN);
+
 
   Network.onEvent(onPPPEvent);
 
@@ -1487,7 +1584,7 @@ void loop() {
       last_di_states[i] = current_di[i]; 
       force_mqtt_publish = true;         
       current_alarm_cause = "DI_" + String(i+1) + "_ALARM";
-      Serial.println("\n🚨 [ALARM TRIGGERED] " + current_alarm_cause);
+      // Serial.println("\n🚨 [ALARM TRIGGERED] " + current_alarm_cause);
     }
   }
   int oldTap = oltcData.currentTap;
@@ -1495,7 +1592,7 @@ void loop() {
   if (oltcData.currentTap != oldTap) {
     force_mqtt_publish = true;
     current_alarm_cause = "OLTC_TAP_CHANGED";
-    Serial.println("\n🎛️ [TAP CHANGED] Publishing Immediately!");
+    // Serial.println("\n🎛️ [TAP CHANGED] Publishing Immediately!");
   }
   // ==========================================================
   // ⏳ SLOW LOOP: HAR 1 MINUTE (60000ms) ME MODBUS READ KAREGA
@@ -1503,13 +1600,13 @@ void loop() {
   if (millis() - last_meter_read_time >= (upload_interval_sec * 1000) || last_meter_read_time == 0) {
     last_meter_read_time = millis();
     
-    Serial.println("\n⏱️ [HEARTBEAT] 1-Minute Modbus Meter Reading Started...");
+    // Serial.println("\n⏱️ [HEARTBEAT] 1-Minute Modbus Meter Reading Started...");
     
-    m1_online = readSchneiderMeter(SCHNEIDER_1_ID, m1_sec1, m1_sec2, m1_sec3);
+    m1_online = readSchneiderMeter(schneider_1_id, m1_sec1, m1_sec2, m1_sec3);
     delay(50); 
-    m2_online = readSchneiderMeter(SCHNEIDER_2_ID, m2_sec1, m2_sec2, m2_sec3);
+    m2_online = readSchneiderMeter(schneider_2_id, m2_sec1, m2_sec2, m2_sec3);
     delay(50); 
-    tprData.is_valid = readTPR702(TPR702_ID, tprData.oilTemp, tprData.hvTemp, tprData.lvTemp);
+    tprData.is_valid = readTPR702(tpr702_id, tprData.oilTemp, tprData.hvTemp, tprData.lvTemp);
 
      // 👇 YEH ALARM CHECK ADD KAREIN:
     if (tprData.is_valid) {
